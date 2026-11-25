@@ -125,10 +125,10 @@ export class DeterministicCaptureNode implements RecordingCaptureNodeLike {
 
   disconnect(): void { this.connected = false; }
 
-  processBlock(frameStart: number, inputs: Float32Array[][]): void {
+  processBlock(frameStart: number, inputs: Float32Array[][], labelFrame: number = frameStart): void {
     if (!this.connected) throw new Error('Cannot process capture audio before the worklet is connected');
     const frameCount = inputs[0]?.[0]?.length ?? 128;
-    this.sandbox.currentFrame = frameStart;
+    this.sandbox.currentFrame = labelFrame;
     const outputs = [[new Float32Array(frameCount)]];
     this.processor.process(inputs, outputs);
   }
@@ -204,6 +204,44 @@ export class DeterministicAudioContext {
       });
       this.captureNode.processBlock(frameStart, [channels]);
       this.frame += quantum;
+    }
+  }
+
+  /**
+   * Reproduces the platform behaviour measured on the real capture path: Chrome
+   * runs several 128-frame render quanta per audio-device buffer but only
+   * refreshes `currentFrame`/`currentTime` at the start of that buffer. The
+   * worklet therefore sees the SAME label for consecutive quanta even though
+   * every quantum carries fresh input, then the label jumps ahead by a whole
+   * buffer. `quantaPerLabel` is the device buffer size in render quanta
+   * (5 was measured, i.e. a 640-frame buffer).
+   */
+  advanceToFrameWithDeviceBufferLabels(
+    targetFrame: number,
+    sample: SampleFunction = () => 0,
+    inputChannels = 1,
+    quantaPerLabel = 5,
+  ): void {
+    if (!Number.isSafeInteger(quantaPerLabel) || quantaPerLabel < 1) {
+      throw new Error('The deterministic device buffer must be at least one render quantum');
+    }
+    if (!Number.isSafeInteger(targetFrame) || targetFrame < this.frame) {
+      throw new Error('The deterministic audio clock can only move forward to an integer frame');
+    }
+    if (!this.captureNode) throw new Error('The recording capture worklet has not been created');
+    const bufferFrames = 128 * quantaPerLabel;
+    while (this.frame < targetFrame) {
+      const frameStart = this.frame;
+      const channels = Array.from({ length: inputChannels }, (_, channel) => {
+        const values = new Float32Array(128);
+        for (let offset = 0; offset < 128; offset++) values[offset] = sample(frameStart + offset, channel);
+        return values;
+      });
+      // Label the quantum with the start of its device buffer, exactly as the
+      // affected Chrome build does, while still delivering distinct audio.
+      const labelFrame = Math.floor(frameStart / bufferFrames) * bufferFrames;
+      this.captureNode.processBlock(frameStart, [channels], labelFrame);
+      this.frame += 128;
     }
   }
 }

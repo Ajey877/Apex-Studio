@@ -1,3 +1,5 @@
+import { mixerSoloAudibleIds } from './mixerSolo';
+import { LiveInputMonitor } from './liveInputMonitor';
 import { interpolateCurve } from './automation/curve';
 import { beatsPerBar, stepsPerBar, stepsToBeats, beatsToSeconds, secondsToBeats, SIXTEENTH_STEPS_PER_BEAT, LEGACY_TIME_SIGNATURE, resolveProjectTimeSignature, type TimeSignature } from '../music/musicalTime';
 import { DEFAULT_SEVEN_EIGHT_GROUPING, isSevenEightGrouping, resolveMeterPulseLayout, resolveMetronomeClickLevel, type MeterPulseLayout, type SevenEightGrouping } from '../music/meterPulse';
@@ -458,6 +460,7 @@ export interface MixerChannel {
   routingInput: AudioNode;
   output: GainNode;
   duckingGain: GainNode;
+  soloGate?: GainNode;
   panner: StereoPannerNode | GainNode;
   analyser: AnalyserNode;
   fxNodes: AudioNode[];
@@ -863,7 +866,11 @@ export interface PunchRecordingSession {
 
 class AudioEngine {
   private nativeInstruments = new NativeVst3Runtime();
-  private nativeMixerEffects = new NativeVst3EffectRuntime(() => {
+  /**
+   * Read-only so acceptance tooling can verify that enabling input monitoring
+   * preserved already-prepared native sessions instead of tearing them down.
+   */
+  public readonly nativeMixerEffects = new NativeVst3EffectRuntime(() => {
     this.stop();
   });
   private nativeOffline: NativeVst3OfflineRender | null = null;
@@ -1212,6 +1219,91 @@ class AudioEngine {
   private masterVolumeValue = 1.0;
   private detachDeviceManagerBridge: (() => void) | null = null;
 
+  public readonly liveInputMonitor = new LiveInputMonitor();
+
+  /** Only existing insert producer inputs are eligible; master/returns are never monitor destinations. */
+  /**
+   * Deterministic key of everything `updateMixerTrack` would build from, or null
+   * when the track cannot be compared. Used to tell a genuinely unchanged Mixer
+   * track from one whose graph state is absent or stale.
+   */
+  private mixerTrackGraphKey(track: MixerTrack): string | null {
+    const serialize = (value: unknown): unknown => {
+      if (Array.isArray(value)) return value.map(serialize);
+      if (ArrayBuffer.isView(value)) {
+        return [value.constructor.name, Array.from(value as unknown as ArrayLike<number>)];
+      }
+      if (value instanceof ArrayBuffer) return ['ArrayBuffer', value.byteLength];
+      if (value && typeof value === 'object') {
+        const source = value as Record<string, unknown>;
+        return Object.keys(source).sort().reduce<Record<string, unknown>>((accumulator, key) => {
+          accumulator[key] = serialize(source[key]);
+          return accumulator;
+        }, {});
+      }
+      return typeof value === 'number' && !Number.isFinite(value) ? String(value) : value;
+    };
+    try {
+      return JSON.stringify(serialize(track));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * True when this track's live Mixer graph already matches `track`, so enabling
+   * input monitoring can leave the running chain alone: its built-in FX
+   * instances and live state, effect tails, routing and latency compensation all
+   * stay as they are. Anything genuinely absent or stale returns false - no
+   * channel yet, a changed setting, an incomparable track, or an enabled native
+   * insert that is not actually prepared (a withheld track is stale even when
+   * its settings match).
+   */
+  private isMixerGraphCurrent(track: MixerTrack, context: BaseAudioContext): boolean {
+    if (!this.mixerChannels.has(track.id)) return false;
+    const known = this.lastKnownMixerTracks.get(track.id);
+    if (!known) return false;
+    const knownKey = this.mixerTrackGraphKey(known);
+    const currentKey = this.mixerTrackGraphKey(track);
+    if (knownKey === null || currentKey === null || knownKey !== currentKey) return false;
+    return track.fxSlots.every(slot => slot.type !== 'vst3' || !slot.enabled ||
+      this.nativeMixerEffects.isPrepared(track.id, slot.id, context, slot.vst3Effect));
+  }
+
+  public async startLiveInputMonitoring(trackId: number, tracks: readonly MixerTrack[] = [...this.lastKnownMixerTracks.values()]): Promise<void> {
+    if (this.shouldBlockLiveMutation() || this.isOfflineRendering || this.isReconfiguringContext) {
+      return Promise.reject(new Error('Wait for audio rendering/reconfiguration before enabling monitoring.'));
+    }
+    const track = tracks.find(candidate => candidate.id === trackId);
+    if (!track || trackId === 0 || track.isAux) {
+      return Promise.reject(new Error('Select an existing Mixer insert (not Master or an aux return).'));
+    }
+    if (['active', 'starting'].includes(this.liveInputMonitor.getSnapshot().status)) {
+      throw new Error('Disable the existing input monitor before assigning another insert.');
+    }
+    this.init();
+    const context = this.ctx as AudioContext;
+    const snapshot = structuredClone([...tracks]);
+    return this.liveInputMonitor.start(context, this.getOrCreateMixerChannel(trackId).input, trackId, async isCurrent => {
+      // Preserve a Mixer graph that is already live. Enabling monitoring while
+      // the transport is playing must not stop prepared native VST3 sessions or
+      // rebuild built-in FX chains: that would drop plugin state and effect
+      // tails mid-song. `ensureTracksPrepared` prepares only what is genuinely
+      // absent or stale, so an unprepared or failed native insert still throws
+      // and is never silently bypassed with a dry path.
+      if (snapshot.some(track => track.fxSlots.some(slot => slot.enabled && slot.type === 'vst3'))) {
+        await this.nativeMixerEffects.ensureTracksPrepared(snapshot, context);
+      }
+      if (!isCurrent()) return;
+      // Only build graph state that is absent or stale. Tracks that already
+      // match keep their transport position, live FX state, routing and latency
+      // compensation exactly as they are.
+      const staleTracks = snapshot.filter(track => !this.isMixerGraphCurrent(track, context));
+      for (const mixerTrack of staleTracks) this.updateMixerTrack(mixerTrack);
+      if (staleTracks.length > 0) this.syncMixerRouting(snapshot);
+    });
+  }
+
   public startDeviceMonitoring(): Promise<AudioDeviceManagerSnapshot> {
     if (!this.detachDeviceManagerBridge) {
       this.detachDeviceManagerBridge = audioDeviceManager.subscribe(() => {
@@ -1222,6 +1314,7 @@ class AudioEngine {
   }
 
   public stopDeviceMonitoring(): void {
+    this.liveInputMonitor.stop();
     this.detachDeviceManagerBridge?.();
     this.detachDeviceManagerBridge = null;
     audioDeviceManager.disposeMonitoring();
@@ -1452,6 +1545,7 @@ class AudioEngine {
     }
     try { channel.panner.disconnect(); } catch (_) {}
     try { channel.duckingGain.disconnect(); } catch (_) {}
+    try { channel.soloGate?.disconnect(); } catch (_) {}
     try { channel.output.disconnect(); } catch (_) {}
     try { channel.analyser.disconnect(); } catch (_) {}
     if (channel.auxSendGains) {
@@ -1532,6 +1626,7 @@ class AudioEngine {
         : {}),
     };
 
+    this.liveInputMonitor.stop('Audio reconfigured. Monitoring is OFF.');
     this.isReconfiguringContext = true;
     this.emitAudioEngineState();
 
@@ -2039,6 +2134,7 @@ class AudioEngine {
     if (this.shouldBlockLiveMutation()) return;
     if (trackId === 0) return; // Master track must never be disconnected or removed
 
+    if (this.liveInputMonitor.getSnapshot().trackId === trackId) this.liveInputMonitor.stop('Monitor insert removed.');
     const channel = this.mixerChannels.get(trackId);
     if (!channel) return;
 
@@ -2058,6 +2154,7 @@ class AudioEngine {
     } catch (_) {}
 
     try {
+      channel.soloGate?.disconnect();
       channel.duckingGain.disconnect();
     } catch (_) {}
 
@@ -2116,6 +2213,7 @@ class AudioEngine {
     this.mixerChannels.delete(trackId);
     if (!this.isOfflineRendering) {
       this.lastKnownMixerTracks.delete(trackId);
+      this.refreshMixerSolo();
     }
     for (const [otherId, otherChannel] of this.mixerChannels) {
       if (otherChannel.sidechainDetector && otherChannel.sidechainDetector.sourceTrackId === trackId) {
@@ -2338,6 +2436,32 @@ class AudioEngine {
     }
   }
 
+  private refreshMixerSolo(): void {
+    const tracks = this.isOfflineRendering ? this.activeMixerTracks : [...this.lastKnownMixerTracks.values()];
+    const audible = mixerSoloAudibleIds(tracks);
+    for (const [id, channel] of this.mixerChannels) {
+      const allowed = !audible || audible.has(id);
+      // Keep the historical non-solo topology byte-for-byte unchanged. A gate is
+      // needed only when a solo first suppresses this channel; automation still
+      // owns the independent output fader, so it cannot reopen a soloed-out path.
+      if (!allowed && !channel.soloGate) {
+        const gate = this.ctx!.createGain();
+        try {
+          gate.connect(channel.output);
+          channel.duckingGain.disconnect(channel.output);
+          channel.duckingGain.connect(gate);
+          channel.soloGate = gate;
+        } catch (error) {
+          gate.disconnect();
+          try { channel.duckingGain.disconnect(); } catch { /* best effort */ }
+          channel.duckingGain.connect(channel.output);
+          throw error;
+        }
+      }
+      if (channel.soloGate) channel.soloGate.gain.setTargetAtTime(allowed ? 1 : 0, this.ctx!.currentTime, 0.005);
+    }
+  }
+
   public updateMixerTrack(track: MixerTrack) {
     if (this.shouldBlockLiveMutation()) return;
     if (!this.isOfflineRendering) {
@@ -2362,6 +2486,7 @@ class AudioEngine {
     // Update FX chain if any
     this.rebuildTrackFxChain(track);
     this.applyMixerTrackRouting(track);
+    this.refreshMixerSolo();
     // Phase 9A: attach/refresh/detach the level detector for this change. The
     // offline render awaits `attachSidechainDetectors()` explicitly instead.
     this.requestSidechainDetectorSync();
@@ -5491,6 +5616,7 @@ class AudioEngine {
     if (this.offlineRenderLeaseHeld) {
       throw new Error('An offline timeline render is already running.');
     }
+    this.liveInputMonitor.stop('Offline rendering started. Monitoring is OFF.');
     this.offlineRenderLeaseHeld = true;
     this.emitAudioEngineState();
     let transportToResume: AudioClockTransport | null = null;
@@ -8161,6 +8287,7 @@ class AudioEngine {
   }
 
  public stop() {
+  this.liveInputMonitor.stop('Transport stopped. Monitoring is OFF.');
   if (this.shouldBlockLiveMutation()) return;
   // Phase 1K/1L: a stop aborts any count-in and any armed punch take.
   this.cancelRecordingCountIn();

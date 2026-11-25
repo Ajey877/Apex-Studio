@@ -1,0 +1,197 @@
+{
+  "kind": "browser-fake-device-not-physical-hardware",
+  "sampleRate": 48000,
+  "latency": {
+    "status": "active",
+    "trackId": 1,
+    "deviceId": "",
+    "channels": 2,
+    "inputLatency": 0.01,
+    "baseLatency": 0.010020833333333333,
+    "outputLatency": 0.032,
+    "message": null
+  },
+  "baseline": {
+    "left": 0.10585065093737893,
+    "right": 0.10596128989518061,
+    "input": 0.10596128989518061,
+    "master": 0.10637431460014023,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "duplicate": {
+    "left": 0.10615766572685002,
+    "right": 0.10607256605892927,
+    "input": 0.10607256605892927,
+    "master": 0.10583775254128099,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "halfFader": {
+    "left": 0.053050289436785525,
+    "right": 0.053081634680076706,
+    "input": 0.10616254144768633,
+    "master": 0.0535493417663333,
+    "meter": 0.078125,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "panLeft": {
+    "left": 0.21218910072908023,
+    "right": 1.2117111947903018e-06,
+    "input": 0.10615728934948011,
+    "master": 0.10688767697673891,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "muted": {
+    "left": 0,
+    "right": 0,
+    "input": 0.10605419869082533,
+    "master": 0,
+    "meter": 0,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "otherSolo": {
+    "left": 0,
+    "right": 0,
+    "input": 0.10606412017662574,
+    "master": 0,
+    "meter": 0,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "ownSolo": {
+    "left": 0.10600867645571495,
+    "right": 0.10608979271085717,
+    "input": 0.10608979271085717,
+    "master": 0.10648027998044435,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "insertFx": {
+    "left": 0.006418281716926611,
+    "right": 0.006418281716926611,
+    "input": 0.10623814973031888,
+    "master": 0.00839457175504123,
+    "meter": 0.015625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "bus": {
+    "left": 0.10378781464077323,
+    "right": 0.10378781464077323,
+    "input": 0.10378781464077323,
+    "master": 0.052879753229728536,
+    "meter": 0.15625,
+    "bus": 0.078125,
+    "aux": 0,
+    "sibling": 0
+  },
+  "busFx": {
+    "left": 0.10615034407541087,
+    "right": 0.10615034407541087,
+    "input": 0.10615034407541087,
+    "master": 0.005524241106621825,
+    "meter": 0.15625,
+    "bus": 0.0078125,
+    "aux": 0,
+    "sibling": 0
+  },
+  "aux": {
+    "left": 0.10599045574514983,
+    "right": 0.10599045574514983,
+    "input": 0.10599045574514983,
+    "master": 0.052954083695410416,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0.078125,
+    "sibling": 0
+  },
+  "auxMuted": {
+    "left": 0.1059188870968187,
+    "right": 0.1059188870968187,
+    "input": 0.1059188870968187,
+    "master": 0,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "masterGain": {
+    "left": 0.10603676092861623,
+    "right": 0.10603676092861623,
+    "input": 0.10593480410016816,
+    "master": 0.014417098538257102,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0.078125,
+    "sibling": 0
+  },
+  "masterFx": {
+    "left": 0.10584934430064268,
+    "right": 0.10584934430064268,
+    "input": 0.10584934430064268,
+    "master": 0.008557713920156215,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "recordingMonitor": {
+    "left": 0.10609492928782105,
+    "right": 0.10618293897349575,
+    "input": 0.10612045663905678,
+    "master": 0.10644271197544312,
+    "meter": 0.15625,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "off": {
+    "left": 0,
+    "right": 0,
+    "input": 0,
+    "master": 0,
+    "meter": 0,
+    "bus": 0,
+    "aux": 0,
+    "sibling": 0
+  },
+  "recording": {
+    "recordingRms": 0.10553408860544966,
+    "frames": 77312,
+    "sampleRate": 48000,
+    "start": 379136,
+    "end": 461440
+  },
+  "resources": {
+    "calls": 1,
+    "tracks": [
+      "ended",
+      "ended",
+      "ended"
+    ]
+  },
+  "testConditions": {
+    "platform": "Linux sandbox",
+    "browser": "Chromium 153.0.0 via uncommitted @sparticuz/chromium npm package",
+    "input": "Chromium fake getUserMedia device, mono 440 Hz WAV, amplitude 0.15, 48000 Hz",
+    "context": "48000 Hz explicitly selected through production Audio Settings",
+    "physicalHardwareTested": false,
+    "enclosingSuiteResult": "2 passed, 1 failed (later separate punch workflow rejected 128 missing input frames)"
+  }
+}

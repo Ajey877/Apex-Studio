@@ -13,6 +13,9 @@ function createWorklet() {
     Number,
     Array,
     Math,
+    // A real AudioWorkletGlobalScope exposes `performance`; the sandbox has to
+    // model that or the cold-start epoch stamps would go untested here.
+    performance,
     AudioWorkletProcessor: class {
       port = {
         onmessage: null as ((event: { data: any }) => void) | null,
@@ -104,7 +107,17 @@ test('Mixer worklet rejects stale/out-of-order sequence data without replacing t
 test('Mixer worklet bounds a saturated request queue and fails closed instead of replaying stale or dry PCM', () => {
   const { processor, next, sendResult } = createWorklet();
   for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.equal(processor.pending, 0, 'block 0 is in flight');
+  // Block 0 is due at output frame VST3_FX_PIPELINE_FRAMES. Rendering up to that
+  // frame is still inside its deadline, so when the second block completes it waits
+  // instead of failing: a result can still arrive between these two callbacks, which
+  // is the only place the audio thread can deliver one.
   for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.equal(processor.failed, false, 'the pending block is not due until the next quantum');
+  assert.equal(processor.outputFrame, VST3_FX_PIPELINE_FRAMES);
+  assert.equal(processMessages(processor).length, 1, 'one pending block is the hard in-flight bound');
+  // The next quantum starts on block 0's due frame. Still no result: fail closed.
+  next();
   assert.equal(processor.failed, true);
   assert.equal(processMessages(processor).length, 1, 'one pending block is the hard in-flight bound');
   assert.equal(profileMessages(processor, 'pending-deadline-miss').length, 1);
@@ -316,7 +329,7 @@ test('two VST3 inserts in one Mixer chain process cascaded stereo PCM in exact s
 
   function createLiveBoundWorklet() {
     const sandbox: any = {
-      currentFrame: 0, Float32Array, Map, Number, Array, Math, String,
+      currentFrame: 0, Float32Array, Map, Number, Array, Math, String, performance,
       AudioWorkletProcessor: class {
         port = {
           onmessage: null as ((event: { data: any; ports?: any[] }) => void) | null,
@@ -535,7 +548,7 @@ test('prepareTracks flushes saved parameter overlays before live-port bind and c
 test('worklet nonzero pluginLatencyFrames aligns mid-take dry bypass at 2048 + L without changing delayFrames or exceeding two-block queues', () => {
   for (const pluginLatency of [320, 1500]) {
     const sandbox: any = {
-      currentFrame: 0, Float32Array, Map, Number, Array, Math, String,
+      currentFrame: 0, Float32Array, Map, Number, Array, Math, String, performance,
       AudioWorkletProcessor: class {
         port = {
           onmessage: null as ((event: { data: any }) => void) | null,
@@ -694,3 +707,164 @@ test('NativeVst3EffectRuntime exposes liveLatencyFramesFor (2048 + pluginLatency
 });
 
 
+
+test('ensureTracksPrepared preserves live native sessions that monitoring init must not tear down', async () => {
+  const originalNode = (globalThis as any).AudioWorkletNode;
+  const nodes: any[] = [];
+  class FakeAudioWorkletNode {
+    port = { onmessage: null as ((event: { data: any }) => void) | null, sent: [] as any[], closed: false,
+      stopSequence: null as number | null,
+      postMessage: (message: any) => {
+        this.port.sent.push(message);
+        if (message?.type === 'stop') queueMicrotask(() => this.port.onmessage?.({ data: {
+          type: 'stop-ack', sequence: this.port.stopSequence, reason: message.reason,
+        } }));
+      }, close() { this.closed = true; } };
+    onprocessorerror: (() => void) | null = null;
+    disconnected = false;
+    constructor(_context: any, _name: string, _options: any) { nodes.push(this); }
+    disconnect() { this.disconnected = true; }
+  }
+  (globalThis as any).AudioWorkletNode = FakeAudioWorkletNode;
+
+  let session = 0;
+  const closed: string[] = [];
+  const opened: string[] = [];
+  let failClassId: string | null = null;
+  const bridge: Vst3Bridge = {
+    paths: async () => [], choosePath: async () => null,
+    discover: async () => ({ plugins: [], errors: [] }), discoverEffects: async () => ({ plugins: [], errors: [] }),
+    inspect: async () => { throw new Error('unused'); }, inspectEffect: async () => { throw new Error('unused'); },
+    describeEffect: async () => ({ parameters: [], controllerAvailable: false }), describe: async () => ({ parameters: [], controllerAvailable: false }),
+    parameters: async () => [],
+    open: async (plugin: any) => {
+      if (failClassId && plugin?.classId === failClassId) throw new Error('native host refused to open the effect');
+      const id = `session-${++session}`;
+      opened.push(id);
+      return { id, latencySamples: 0 };
+    },
+    process: async () => new Float32Array(),
+    processAudio: async () => new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.25),
+    close: async id => { closed.push(id); },
+  };
+  const context: any = { sampleRate: 48000, currentTime: 0, state: 'running', audioWorklet: { addModule: async () => {} } };
+  const runtime = new NativeVst3EffectRuntime(() => {}, () => bridge);
+  try {
+    // A song is already playing with this insert prepared.
+    await runtime.prepareTracks([track], context);
+    const liveNode = runtime.nodeFor(track.id, slot.id, context, effect);
+    assert.ok(liveNode, 'the insert is prepared before monitoring is enabled');
+    assert.equal(opened.length, 1);
+
+    // Monitoring init must reuse it: same node, same session, nothing closed.
+    await runtime.ensureTracksPrepared([track], context);
+    assert.equal(nodes.length, 1, 'no additional native worklet node was built');
+    assert.equal(closed.length, 0, 'the running native session was not stopped');
+    assert.equal(runtime.nodeFor(track.id, slot.id, context, effect), liveNode, 'the same prepared node is reused');
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, effect), true);
+
+    // Idempotent: a second monitoring init is still non-destructive.
+    await runtime.ensureTracksPrepared([track], context);
+    assert.equal(nodes.length, 1);
+    assert.equal(closed.length, 0);
+
+    // Contrast: the destructive path this replaced does stop the live session.
+    await runtime.prepareTracks([track], context);
+    assert.equal(closed.length, 1, 'prepareTracks stops the live session, which is why monitoring no longer calls it');
+    assert.ok(closed.includes('session-1'));
+    const rebuiltNode = runtime.nodeFor(track.id, slot.id, context, effect);
+    assert.ok(rebuiltNode && rebuiltNode !== liveNode, 'prepareTracks rebuilt the insert');
+
+    // Genuinely stale state is still re-prepared, never silently reused.
+    const changedEffect: Vst3Effect = { ...effect, state: { ...effect.state, parameters: [{ id: 7, value: 0.5 }] } };
+    const changedTrack: MixerTrack = { ...track, fxSlots: [{ ...slot, vst3Effect: changedEffect }] };
+    const beforeNodes = nodes.length;
+    await runtime.ensureTracksPrepared([changedTrack], context);
+    assert.equal(nodes.length, beforeNodes + 1, 'a changed effect configuration is re-prepared');
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, changedEffect), true);
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, effect), false, 'the stale configuration is gone');
+    const preservedSession = opened[opened.length - 1];
+
+    // A failed new insert throws and must not take the running session with it,
+    // and must not be silently bypassed either.
+    const failingClassId = 'FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF';
+    failClassId = failingClassId;
+    const failingEffect: Vst3Effect = { ...effect, classId: failingClassId,
+      state: { schema: 1, classId: failingClassId, parameters: [] } };
+    const failingTrack: MixerTrack = { id: 2, name: 'Failing', color: '#fff', volume: 1, pan: 0, mute: false, solo: false,
+      peakL: 0, peakR: 0, fxSlots: [{ id: 'fx-fail', type: 'vst3', name: 'Failing', enabled: true, mix: 1, params: {}, vst3Effect: failingEffect }] };
+    const closedBeforeFailure = closed.length;
+    await assert.rejects(runtime.ensureTracksPrepared([changedTrack, failingTrack], context), /native host refused/i);
+    assert.equal(closed.length, closedBeforeFailure, 'the already-running session survives a failed sibling insert');
+    assert.equal(runtime.isPrepared(track.id, slot.id, context, changedEffect), true);
+    assert.equal(runtime.nodeFor(failingTrack.id, 'fx-fail', context, failingEffect), undefined,
+      'the failed insert is not left half-prepared or bypassed');
+    assert.ok(!closed.includes(preservedSession), 'preserved');
+  } finally {
+    await runtime.stop();
+    (globalThis as any).AudioWorkletNode = originalNode;
+  }
+});
+
+test('the worklet stamps submit and acceptance on a cross-process comparable clock', () => {
+  // A cold-start deadline miss has to be split into renderer->main, helper round
+  // trip and main->renderer. That is only possible if the worklet records a wall
+  // clock in epoch milliseconds: its own performance.now() origin differs from the
+  // main process's, so a bare performance.now() would produce a meaningless delta.
+  const { processor, next, sendResult } = createWorklet();
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  const submit = profileMessages(processor, 'worklet-submit').at(-1) as any;
+  assert.equal(typeof submit.submittedAtEpochMs, 'number', 'the submit carries a wall clock');
+  assert.ok(submit.submittedAtEpochMs > Date.now() - 60000 && submit.submittedAtEpochMs < Date.now() + 60000,
+    `the stamp must be epoch milliseconds, got ${submit.submittedAtEpochMs}`);
+  // The block request itself carries the stamp, because that is what reaches the
+  // main process and lets it measure how long the block took to arrive.
+  const request = processMessages(processor).at(-1) as any;
+  assert.equal(request.timing.submittedAtEpochMs, submit.submittedAtEpochMs,
+    'the submitted block and its request carry the same stamp');
+
+  sendResult(0, 0.5);
+  for (let i = 0; i < 5; i++) next();
+  const accepted = profileMessages(processor, 'worklet-result').find((message: any) => message.accepted) as any;
+  assert.equal(typeof accepted.acceptedAtEpochMs, 'number', 'acceptance is stamped');
+  assert.equal(accepted.submittedAtEpochMs, submit.submittedAtEpochMs,
+    'the acceptance echoes the submit it belongs to, so the legs can be paired');
+  assert.ok(accepted.roundTripMs >= 0, `the round trip must be non-negative, got ${accepted.roundTripMs}`);
+  assert.equal(accepted.roundTripMs, accepted.acceptedAtEpochMs - accepted.submittedAtEpochMs,
+    'the round trip is the difference of the two epoch stamps');
+});
+
+test('cold-start stamps fall back to Date.now when performance is absent, as in a real worklet', () => {
+  // AudioWorkletGlobalScope does not expose `performance` in Chromium, which is
+  // exactly what the packaged Windows build measured: every stamp came back null
+  // and the renderer->main leg could not be computed. The fallback has to produce
+  // a usable epoch stamp, and diagnostics run on the real-time audio thread so a
+  // failed stamp may never become a failed audio block.
+  const sandbox: any = {
+    currentFrame: 0, Float32Array, Map, Number, Array, Math,
+    AudioWorkletProcessor: class {
+      port = {
+        onmessage: null as ((event: { data: any }) => void) | null,
+        sent: [] as any[],
+        postMessage(message: any) { this.sent.push(message); },
+      };
+    },
+    registerProcessor(_name: string, constructor: new (options: any) => any) { sandbox.Processor = constructor; },
+  };
+  runInNewContext(VST3_FX_WORKLET_SOURCE, sandbox);
+  const processor = new sandbox.Processor({ processorOptions: { profileEnabled: true } });
+  let contextFrame = 0;
+  const input = new Float32Array(128).fill(0.25);
+  for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) {
+    sandbox.currentFrame = contextFrame;
+    const outputs = [[new Float32Array(128), new Float32Array(128)]];
+    processor.process([[input, input]], outputs);
+    contextFrame += 128;
+  }
+  assert.equal(processor.failed, false, 'a missing performance object must not fail the block');
+  const submit = processor.port.sent.filter((message: any) => message?.event === 'worklet-submit').at(-1);
+  assert.equal(typeof submit.submittedAtEpochMs, 'number',
+    'the Date.now fallback must still yield an epoch stamp');
+  assert.ok(Math.abs(submit.submittedAtEpochMs - Date.now()) < 60000,
+    `the fallback stamp must be epoch milliseconds, got ${submit.submittedAtEpochMs}`);
+});

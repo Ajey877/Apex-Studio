@@ -52,7 +52,13 @@ export interface NativeVst3MixerEffectSmokeEvent {
   [key: string]: unknown;
 }
 const smokeTimingEvents: NativeVst3MixerEffectSmokeEvent[] = [];
-const mixerFxSmokeEnabled = () => (globalThis as any).desktopApp?.smokeTest === true;
+// Timing instrumentation is on for a smoke session and for a timing-only session.
+// The two are distinct because only a smoke session runs the built-in smoke
+// sequence (src/main.tsx); a timing-only session just records.
+const mixerFxSmokeEnabled = () => {
+  const desktop = (globalThis as any).desktopApp;
+  return desktop?.smokeTest === true || desktop?.smokeTimings === true;
+};
 function recordMixerFxSmokeEvent(event: NativeVst3MixerEffectSmokeEvent) {
   if (!mixerFxSmokeEnabled()) return;
   if (smokeTimingEvents.length < 8192) smokeTimingEvents.push({ ...event, rendererAtMs: performance.now() });
@@ -81,9 +87,15 @@ export const VST3_FX_PIPELINE_FRAMES = VST3_FX_BLOCK_FRAMES * 2;
  * become silence and an explicit stop/failure, never dry or stale PCM.
  */
 export const VST3_FX_WORKLET_SOURCE = `
+// The pending guard's fail-closed message, shared by both of its paths so a
+// listener cannot tell them apart by text - the event fields say which sample
+// tripped it. Declared inside this source: the worklet is evaluated in its own
+// scope and cannot see the module that ships it.
+const PENDING_DEADLINE_MISSED = 'Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.';
 class ApexVst3FxProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
+    this.pendingSubmittedAtEpochMs = null;
     this.blockFrames = ${VST3_FX_BLOCK_FRAMES};
     this.delayFrames = ${VST3_FX_PIPELINE_FRAMES};
     this.pluginLatencyFrames = 0;
@@ -102,6 +114,7 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.livePort = null;
     this.sequence = 0;
     this.pending = -1;
+    this.pendingSubmittedAtEpochMs = null;
     this.ready = new Map();
     this.dryReady = new Map();
     this.bypass = false;
@@ -118,14 +131,19 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
         return;
       }
       if (message?.type !== 'result') return;
+      const acceptedAtEpochMs = this.profileEnabled ? this.epochNowMs() : null;
       const valid = !this.failed && !this.stopped && message.sequence === this.pending &&
         message.samples instanceof Float32Array && message.samples.length === this.blockFrames * 2;
       if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-result', sequence: message.sequence,
         accepted: valid, pendingSequence: this.pending, receivedOutputFrame: this.outputFrame,
         dueOutputFrame: Number.isInteger(message.sequence) ? this.delayFrames + message.sequence * this.blockFrames : null,
+        acceptedAtEpochMs, submittedAtEpochMs: this.pendingSubmittedAtEpochMs,
+        roundTripMs: acceptedAtEpochMs !== null && this.pendingSubmittedAtEpochMs !== null
+          ? acceptedAtEpochMs - this.pendingSubmittedAtEpochMs : null,
         reason: valid ? null : (this.failed ? 'after-failure' : (this.stopped ? 'after-stop' : 'stale-duplicate-or-malformed')) });
       if (!valid) return;
       this.pending = -1;
+      this.pendingSubmittedAtEpochMs = null;
       this.ready.set(message.sequence, message.samples);
       if (this.ready.size > 2 || this.dryReady.size > 2) this.fail('Native effect output queue exceeded its two-block bound.');
     };
@@ -174,12 +192,99 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       handleLive(message);
     };
   }
+  epochNowMs() {
+    // Wall clock in epoch milliseconds, which is the only reading comparable
+    // between this audio thread and the main process (their performance.now()
+    // origins differ). AudioWorkletGlobalScope does NOT expose a performance object in
+    // Chromium - measured on the packaged Windows build, every stamp came back
+    // null - so Date.now() is the clock that actually works here. Millisecond
+    // resolution against a 21.33 ms budget is coarse but sufficient to attribute
+    // a leg, and the main-process side keeps sub-millisecond precision.
+    // Diagnostics only: this must never be able to throw on the audio thread.
+    try {
+      if (typeof performance !== 'undefined' && typeof performance.timeOrigin === 'number') {
+        return performance.timeOrigin + performance.now();
+      }
+      return typeof Date !== 'undefined' ? Date.now() : null;
+    } catch (error) { return null; }
+  }
   fail(reason) {
     if (this.failed) return;
     this.failed = true;
     this.ready.clear();
     this.dryReady.clear();
     this.port.postMessage({ type: 'failure', reason });
+  }
+  /** Output frame at which the block this.pending refers to is first needed. */
+  pendingDueOutputFrame() {
+    return this.delayFrames + this.pending * this.blockFrames;
+  }
+  /**
+   * One report for both fail-closed paths of the pending guard, so the event keeps
+   * a single shape whichever sample tripped it. Argument i is the input sample the
+   * guard was evaluated on and quantumFrames the render quantum length; every frame
+   * below is derived from those two plus this.outputFrame, which only advances
+   * after the whole quantum.
+   */
+  reportPendingDeadlineMiss(i, quantumFrames) {
+    if (!this.profileEnabled) return;
+    this.port.postMessage({ type: 'profile', event: 'pending-deadline-miss', sequence: this.pending,
+      pendingSequence: this.pending, nextSequence: this.sequence, inputContextFrame: currentFrame + i,
+      // outputFrameAtQuantumStart is this.outputFrame at quantum entry, i.e. the
+      // frame the quantum STARTS at; currentOutputFrame is the frame actually being
+      // evaluated, outputFrameAtQuantumStart + i. nextQuantumOutputFrame is where
+      // the next quantum begins. Nothing is inferred: these are the counters as
+      // they stand at the sample that tripped the guard.
+      outputFrameAtQuantumStart: this.outputFrame,
+      inputSampleIndex: i,
+      inputQuantumFrames: quantumFrames,
+      currentOutputFrame: this.outputFrame + i,
+      nextQuantumOutputFrame: this.outputFrame + quantumFrames,
+      dueOutputFrame: this.pendingDueOutputFrame(),
+      readySequences: Array.from(this.ready.keys()), drySequences: Array.from(this.dryReady.keys()) });
+  }
+  /**
+   * Hand the block that is complete in this.left/this.right to the native helper.
+   * Argument i is the input sample whose consumption completed it, or 0 when it
+   * completed on the last sample of the previous quantum and is being handed off at
+   * the start of this one. Extracted so the deferred path and the immediate path stay one
+   * implementation; it is a prototype method, not a closure, so the real-time loop
+   * allocates nothing extra per quantum.
+   */
+  submitFilledBlock(i) {
+    const samples = new Float32Array(this.blockFrames * 2);
+    samples.set(this.left, 0);
+    samples.set(this.right, this.blockFrames);
+    const sequence = this.sequence++;
+    const inputBlockStartContextFrame = currentFrame + i + 1 - this.blockFrames;
+    const submittedContextFrame = currentFrame + i + 1;
+    const submittedOutputFrame = this.outputFrame + i + 1;
+    const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
+    // Epoch wall clock, not performance.now(): the worklet and the main
+    // process have different time origins, so only timeOrigin + now is
+    // comparable across them. This is what lets a deadline miss be split
+    // into renderer->main, helper round trip and main->renderer legs.
+    const submittedAtEpochMs = this.profileEnabled ? this.epochNowMs() : null;
+    this.pendingSubmittedAtEpochMs = submittedAtEpochMs;
+    const timing = { sequence, inputBlockStartContextFrame, submittedContextFrame, submittedOutputFrame,
+      dueOutputFrame, dueContextFrame: this.nodeStartContextFrame + dueOutputFrame,
+      ...(submittedAtEpochMs === null ? {} : { submittedAtEpochMs }) };
+    this.dryReady.set(sequence, samples.slice());
+    this.pending = sequence;
+    if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });
+    const payload = { type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) };
+    if (this.livePort) {
+      // Cross-process MessagePort (AudioWorklet -> Electron MessagePortMain)
+      // structured-clones typed arrays over Mojo; transferring ArrayBuffer
+      // across OS processes is unsupported by Chromium BlinkTransferableMessage.
+      this.livePort.postMessage(payload);
+    } else if (!this.requireLivePort) {
+      this.port.postMessage(payload, [samples.buffer]);
+    } else {
+      this.fail('Live audio port is not bound.');
+      return;
+    }
+    this.fill = 0;
   }
   process(inputs, outputs) {
     const out = outputs[0];
@@ -200,44 +305,53 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     // so plugin tails drain and output sequence/deadline accounting stays exact.
     if (!left || !right) left = right = this.silentInput;
     if (left && right) {
-      for (let i = 0; i < left.length; i++) {
-        this.left[this.fill] = left[i];
-        this.right[this.fill] = right[i];
-        this.fill++;
-        if (this.fill === this.blockFrames) {
-          if (this.pending !== -1) {
-            if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'pending-deadline-miss', sequence: this.pending,
-              nextSequence: this.sequence, inputContextFrame: currentFrame + i, currentOutputFrame: this.outputFrame,
-              dueOutputFrame: this.delayFrames + this.pending * this.blockFrames });
-            this.fail('Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.');
-            break;
+      const quantumFrames = left.length;
+      // A block that filled on the LAST sample of the previous quantum while its
+      // predecessor's result was still outstanding is resolved here, before any
+      // input is consumed. This is the correction. The guard used to fail at the
+      // filling sample, which is exactly one output frame BEFORE the pending
+      // block's due frame, so a result delivered between process() calls - the
+      // only place the audio thread can deliver one - was refused even though the
+      // block was not needed until this very frame. The wait now ends on the frame
+      // that actually needs the block: either the result arrived and the waiting
+      // block is handed off, or it did not and the effect fails closed. Nothing
+      // here waits, retries or substitutes audio; it only stops deciding early.
+      if (this.fill === this.blockFrames) {
+        if (this.pending !== -1) {
+          this.reportPendingDeadlineMiss(0, quantumFrames);
+          this.fail(PENDING_DEADLINE_MISSED);
+        } else {
+          this.submitFilledBlock(0);
+        }
+      }
+      if (!this.failed) {
+        for (let i = 0; i < quantumFrames; i++) {
+          this.left[this.fill] = left[i];
+          this.right[this.fill] = right[i];
+          this.fill++;
+          if (this.fill === this.blockFrames) {
+            if (this.pending !== -1) {
+              // The previous block's result is still outstanding. Fail only if
+              // that block is already due at this sample. Otherwise wait, so a
+              // result landing between process() calls can still be taken.
+              //
+              // Waiting is only possible on the last sample of a quantum: holding
+              // a full block mid-quantum would mean dropping input, so any other
+              // position fails closed exactly as before. With a 1024-frame block
+              // and a 128-frame render quantum the block always fills on a
+              // quantum's last sample, and every due frame is a multiple of the
+              // block size and therefore a quantum boundary - so the wait is
+              // always resolved by the check above, on the due frame itself.
+              if (i < quantumFrames - 1 ||
+                  this.outputFrame + i >= this.pendingDueOutputFrame()) {
+                this.reportPendingDeadlineMiss(i, quantumFrames);
+                this.fail(PENDING_DEADLINE_MISSED);
+                break;
+              }
+            } else {
+              this.submitFilledBlock(i);
+            }
           }
-          const samples = new Float32Array(this.blockFrames * 2);
-          samples.set(this.left, 0);
-          samples.set(this.right, this.blockFrames);
-          const sequence = this.sequence++;
-          const inputBlockStartContextFrame = currentFrame + i + 1 - this.blockFrames;
-          const submittedContextFrame = currentFrame + i + 1;
-          const submittedOutputFrame = this.outputFrame + i + 1;
-          const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
-          const timing = { sequence, inputBlockStartContextFrame, submittedContextFrame, submittedOutputFrame,
-            dueOutputFrame, dueContextFrame: this.nodeStartContextFrame + dueOutputFrame };
-          this.dryReady.set(sequence, samples.slice());
-          this.pending = sequence;
-          if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });
-          const payload = { type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) };
-          if (this.livePort) {
-            // Cross-process MessagePort (AudioWorklet -> Electron MessagePortMain)
-            // structured-clones typed arrays over Mojo; transferring ArrayBuffer
-            // across OS processes is unsupported by Chromium BlinkTransferableMessage.
-            this.livePort.postMessage(payload);
-          } else if (!this.requireLivePort) {
-            this.port.postMessage(payload, [samples.buffer]);
-          } else {
-            this.fail('Live audio port is not bound.');
-            break;
-          }
-          this.fill = 0;
         }
       }
     }
@@ -252,9 +366,15 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
       if (!processed || !dry) {
         const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
         const currentOutputFrame = this.outputFrame + i;
+        // Same vocabulary as the pending guard, so the two can be compared field by
+        // field. This guard is evaluated in the OUTPUT loop, so the sample index is
+        // an output sample index; currentOutputFrame here has always been the exact
+        // frame being evaluated, and its meaning is unchanged.
         if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'deadline-miss', sequence, sourceFrame,
           dueOutputFrame, currentOutputFrame, pendingSequence: this.pending, readySequences: Array.from(this.ready.keys()),
-          drySequences: Array.from(this.dryReady.keys()) });
+          drySequences: Array.from(this.dryReady.keys()),
+          outputFrameAtQuantumStart: this.outputFrame, outputSampleIndex: i,
+          outputQuantumFrames: out[0].length, nextQuantumOutputFrame: this.outputFrame + out[0].length });
         this.fail('Native effect output was not ready at its scheduled audio frame; playback stopped rather than using dry or stale audio. Sequence ' + sequence + ', source frame ' + sourceFrame + ', due output frame ' + dueOutputFrame + ', current output frame ' + currentOutputFrame + ', pending sequence ' + this.pending + '.');
         break;
       }
@@ -425,6 +545,67 @@ export class NativeVst3EffectRuntime {
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failure) {
       if (generation === this.prepareGeneration) await this.stopEntries('prepare-failed');
+      throw failure.reason;
+    }
+  }
+
+  /**
+   * Prepares only the native VST3 inserts that are genuinely absent or stale and
+   * leaves every already-prepared node, plugin session and live audio port
+   * running. Enabling input monitoring while the transport is playing must not
+   * tear down live inserts: `prepareTracks` stops every session first, which
+   * would drop plugin state and effect tails mid-song. A reused insert is still
+   * verified against the current context, effect configuration and lifecycle
+   * flags, so a stale, faulted or stopping session is re-prepared rather than
+   * silently accepted. Failures are thrown, never bypassed with a dry path.
+   */
+  async ensureTracksPrepared(tracks: MixerTrack[], context: BaseAudioContext): Promise<void> {
+    const generation = ++this.prepareGeneration;
+    const slots = tracks.flatMap(track => track.fxSlots.filter(slot => slot.type === 'vst3' && slot.enabled).map(slot => ({ track, slot })));
+    const live = new Map(slots.map(({ track, slot }) => [runtimeKey(track.id, slot.id), { track, slot }] as const));
+    // Release sessions that no longer belong to this graph (removed slot, stale
+    // context, changed effect state) so they neither leak nor get reused.
+    for (const [key, entry] of [...this.prepared]) {
+      const current = live.get(key);
+      const reusable = !!current && entry.trackId === current.track.id && entry.context === context &&
+        !entry.disposed && !entry.stopping && !entry.faulted && effectKey(current.slot.vst3Effect) === entry.configuration;
+      if (reusable) continue;
+      this.prepared.delete(key);
+      clearDiagnostic(entry.trackId, entry.slotId);
+      if (!entry.disposed && !entry.stopping) await this.disposeEntry(entry, 'stale-entry');
+    }
+    if (generation !== this.prepareGeneration) throw new Error('Native effect preparation cancelled.');
+    if (!slots.length) return;
+    if (slots.length > 8) throw new Error('At most 8 live VST3 Mixer effect inserts are supported in one take.');
+    const bridge = this.getBridge();
+    if (!bridge) throw new Error('Native VST3 Mixer effects require the Windows desktop application. The saved effect and state are retained.');
+    await ensureProcessor(context);
+    if (generation !== this.prepareGeneration) throw new Error('Native effect preparation cancelled.');
+    const missing = slots.filter(({ track, slot }) => !this.isPrepared(track.id, slot.id, context, slot.vst3Effect));
+    if (!missing.length) return;
+    const created = new Set<string>();
+    const results = await Promise.allSettled(missing.map(({ track, slot }) => {
+      created.add(runtimeKey(track.id, slot.id));
+      return this.prepareOne(track.id, slot, context, bridge, generation).catch(error => {
+        if (generation === this.prepareGeneration) {
+          reportVst3MixerEffect(track.id, slot.id, error instanceof Error ? error.message : String(error));
+        }
+        throw error;
+      });
+    }));
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failure) {
+      if (generation === this.prepareGeneration) {
+        // Unwind only what THIS call created. Sessions that were already running
+        // belong to the playing song and keep running; the caller refuses
+        // monitoring instead of leaving a failed insert silently bypassed.
+        for (const key of created) {
+          const entry = this.prepared.get(key);
+          if (!entry) continue;
+          this.prepared.delete(key);
+          await this.disposeEntry(entry, 'prepare-failed');
+        }
+      }
       throw failure.reason;
     }
   }

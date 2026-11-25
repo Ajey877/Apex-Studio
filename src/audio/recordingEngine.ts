@@ -1,3 +1,4 @@
+import { managedAudioInput } from './managedAudioInput';
 import { persistAudioClip, deletePersistedAudioClip as deletePersistedAudioClipFromStore } from './audioPersistence';
 import { installAudioPlaybackLifecycle } from './audioPlaybackLifecycle';
 import { sessionBlobUrlRegistry } from '../state/sessionBlobUrlRegistry';
@@ -128,12 +129,15 @@ const errorFrom = (error: unknown, fallback: string): Error =>
   error instanceof Error ? error : new Error(fallback);
 
 export class RecordingEngine {
+  private readonly managedInputReleases = new WeakMap<MediaStream, () => void>();
   private stream: MediaStream | null = null;
   private detachStreamMonitor: (() => void) | null = null;
   private releaseActiveSessionToken: (() => void) | null = null;
   private detachContextStateListener: (() => void) | null = null;
   private inputSource: Pick<AudioNode, 'connect' | 'disconnect'> | null = null;
   private captureNode: RecordingCaptureNodeLike | null = null;
+  private frameLabelJumps = 0;
+  private lastFrameLabelJump: { frame: number; expectedFrame: number; frameCount: number } | null = null;
   private silentSink: GainNode | null = null;
   private analyser: AnalyserNode | null = null;
   private context: AudioContext | null = null;
@@ -213,6 +217,21 @@ export class RecordingEngine {
   }
 
   /**
+   * Number of times the capture worklet observed the platform's `currentFrame`
+   * failing to advance by exactly one render quantum. The monotonic worklet
+   * cursor absorbs these, so a non-zero value is expected on affected Chrome
+   * builds and is diagnostic evidence rather than a coverage defect.
+   */
+  get captureFrameLabelJumps(): number {
+    return this.frameLabelJumps;
+  }
+
+  /** Frame details of the most recent `currentFrame` label jump, if any. */
+  get lastCaptureFrameLabelJump(): { frame: number; expectedFrame: number; frameCount: number } | null {
+    return this.lastFrameLabelJump;
+  }
+
+  /**
    * Opens and primes the input graph BEFORE a count-in or punch boundary is
    * scheduled. The worklet continuously sends frame-stamped PCM while prepared;
    * `start()` can therefore select a boundary even if its JS callback arrives
@@ -252,8 +271,11 @@ export class RecordingEngine {
         ? this.explicitInputDeviceId
         : this.deviceManager.getPreferredInputDeviceId();
       const constraints = this.deviceManager.buildRecordingConstraints(requestedDeviceId);
-      const getUserMedia = this.getUserMediaOverride ?? ((value: MediaStreamConstraints) =>
-        navigator.mediaDevices.getUserMedia(value));
+      const getUserMedia = this.getUserMediaOverride ?? (async (_value: MediaStreamConstraints) => {
+        const lease = await managedAudioInput.acquire(requestedDeviceId);
+        this.managedInputReleases.set(lease.stream, lease.release);
+        return lease.stream;
+      });
       const request = getUserMedia(constraints);
       // A getUserMedia permission prompt cannot be aborted by the web platform.
       // If it resolves after cancellation, this continuation still stops the late stream.
@@ -551,6 +573,17 @@ export class RecordingEngine {
       this.handlePcmBlock(value, generation);
       return;
     }
+    // The worklet's monotonic cursor already absorbs this; recorded only as
+    // evidence that the platform's `currentFrame` did not advance per quantum.
+    if (value.type === 'frameLabelJump') {
+      this.frameLabelJumps++;
+      this.lastFrameLabelJump = {
+        frame: Number(value.frame),
+        expectedFrame: Number(value.expectedFrame),
+        frameCount: Number(value.frameCount),
+      };
+      return;
+    }
     if (value.type === 'started') {
       if (value.sessionId === generation) {
         this.armDeferred?.resolve();
@@ -792,6 +825,8 @@ export class RecordingEngine {
 
   private stopStream(stream: MediaStream | null): void {
     if (!stream) return;
+    const release = this.managedInputReleases.get(stream);
+    if (release) { release(); return; }
     try {
       stream.getTracks().forEach(track => {
         try { track.stop(); } catch (_) { /* best effort */ }

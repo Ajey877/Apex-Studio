@@ -55,6 +55,7 @@ jobs:
         run: npm run build
 
       - name: Validate Windows package
+        id: windows-package-dir
         run: npm run package:win:dir
 
       - name: Verify production native DAW integration on Windows
@@ -67,6 +68,7 @@ jobs:
         run: npm run test:vst3-editor-process
 
       - name: Build the native helper and the genuine AGain VSTGUI editor fixture
+        id: native-helper-build
         run: npm run native:vst3:build
 
       - name: Verify the AGain VSTGUI editor fixture was built and is discoverable
@@ -75,10 +77,125 @@ jobs:
       - name: Run packaged Windows runtime smoke test
         run: npm run smoke:win
 
+      - name: Packaged Windows live input PCM and recording acceptance (fake microphone)
+        run: npm run test:live-input-packaged
+
+      - name: Upload live input acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-packaged-live-input-evidence
+          path: build/live-input-evidence
+          if-no-files-found: warn
+
+      # The evidence gap this closes: a REAL native VST3 session, already
+      # processing audio through the real helper process during playback, must
+      # survive live-input monitoring initialization on the same insert. Renderer
+      # tests and simulated bridges cannot prove this, so it runs against the
+      # packaged executable with the real MDA plugin and the OS process table.
+      - name: Packaged native VST3 + live input coexistence acceptance
+        id: native-coexistence-gate
+        if: runner.os == 'Windows'
+        timeout-minutes: 30
+        env:
+          APEX_NATIVE_MONITORING_RUNS: '5'
+          # Absolute, inside the workspace. The acceptance script runs with its cwd
+          # inside the packaged resources tree, so a relative path put the evidence
+          # where the upload below could not find it.
+          APEX_NATIVE_MONITORING_EVIDENCE_DIR: ${{ github.workspace }}/build/native-monitoring-evidence
+        run: npm run test:native-monitoring-packaged
+
+      - name: Upload native VST3 + live input coexistence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-packaged-native-monitoring-evidence
+          path: build/native-monitoring-evidence
+          if-no-files-found: warn
+
+      # DIAGNOSTIC ONLY - not a merge gate, and not a retry of the acceptance above.
+      # The 5-run acceptance above already recorded its own verdict before this step
+      # runs. This pass exists because the cold-start deadline miss is intermittent
+      # (about 1 repetition in 12), so a 5-run pass rarely captures one: it runs more
+      # genuinely cold repetitions to collect the timing decomposition AT the moment
+      # of a miss. No repetition is re-run, so nothing here can turn a failure into a
+      # pass, and continue-on-error keeps a diagnostic miss from masking the gating
+      # result.
+      #
+      # Reporting is ONE aggregate annotation for every repetition plus full detail
+      # for the failures and repetition 1 - not one annotation per repetition, which
+      # hit GitHub's annotation-count cap and silently dropped most of them.
+      # Runs even when the five-run gate above has FAILED - that is exactly when the
+      # evidence is most needed. Previously this was conditioned only on the OS, so a
+      # gate failure ended the job and skipped the diagnostic. It stays non-gating:
+      # continue-on-error means its own result cannot fail the job, and cannot mask
+      # the gate's failure either, because a job's conclusion already reflects any
+      # step without continue-on-error. The gate's own outcome is reported
+      # separately below so the two verdicts are never conflated.
+      # !cancelled() rather than always(), so a cancelled run is not resurrected.
+      # The two prerequisite outcomes are required because without the packaged
+      # executable and the native helper there is nothing to measure.
+      - name: Cold-start deadline diagnostic (high volume, non-gating)
+        id: native-diagnostic
+        if: >-
+          !cancelled() && runner.os == 'Windows' &&
+          steps.windows-package-dir.outcome == 'success' &&
+          steps.native-helper-build.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 150
+        env:
+          # 15 repetitions passed clean, which is not enough to catch a miss that
+          # happens in a few percent of cold starts. Measured cost is about 0.7 min
+          # per repetition, so 60 fits the timeout and gives a high chance of
+          # capturing one with its full decomposition.
+          APEX_NATIVE_MONITORING_RUNS: '60'
+          APEX_NATIVE_MONITORING_LABEL: 'coldstart-diagnostic'
+          # Continue after a failed repetition so all 60 are attempted and each is
+          # recorded PASS or FAIL. The 5-repetition gate above does NOT set this and
+          # stays fail-fast. The overall diagnostic result is still FAIL if any
+          # repetition failed.
+          APEX_NATIVE_MONITORING_CONTINUE_AFTER_FAILURE: '1'
+          # Separate directory: the diagnostic must not overwrite the gating run's
+          # evidence, and its own evidence must reach its own artifact.
+          APEX_NATIVE_MONITORING_EVIDENCE_DIR: ${{ github.workspace }}/build/native-diagnostic-evidence
+        # continue-on-error makes this step's reported outcome 'success' whether or
+        # not the diagnostic passed, so the real result is written to an output as
+        # well. Without it the verdict step below would print 'success' for a
+        # diagnostic that failed - which it did, reporting success for a run whose
+        # own evidence said 52 of 60 passed.
+        # continue-on-error hides the exit code from the job verdict, and this job's
+        # log redirects to blob storage this environment cannot read, so a failure
+        # here has to publish its own reason as an annotation or it is invisible.
+        shell: bash
+        run: |
+          log=$(mktemp)
+          set +e
+          npm run test:native-monitoring-packaged 2>&1 | tee "$log"
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=FAIL" >> "$GITHUB_OUTPUT"
+            echo "::error title=cold-start diagnostic exited ${status}::evidenceDir=${APEX_NATIVE_MONITORING_EVIDENCE_DIR} packageDir=dist-electron/win-unpacked node=$(node --version) tail=$(tail -n 40 "$log" | tr '\n' '|')"
+          fi
+          exit "$status"
+
       # Packaged-application editor acceptance: Playwright drives the REAL packaged
       # exe (Mixer insert -> plug-in's own window), and native facts are read from
       # the OS process table. The display-scale row runs at real 125% and 150%;
       # rows that need a second monitor or a person are recorded NOT_VERIFIED.
+      # Uploaded after the diagnostic, from the diagnostic's own directory, so the
+      # sixty-run evidence survives a failed gate instead of being left on the
+      # runner.
+      - name: Upload cold-start diagnostic evidence
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apex-packaged-native-diagnostic-evidence
+          path: build/native-diagnostic-evidence
+          if-no-files-found: warn
+
       - name: Native VST3 editor acceptance through the packaged application
         id: packaged-editor-acceptance
         if: runner.os == 'Windows'
@@ -119,8 +236,30 @@ jobs:
           # Do not fail here: the artifact must still upload after a failure, and the
           # verdict step below is the single place that decides the job's outcome.
           exit 0
+      - name: Record the cold-start diagnostic verdict
+        if: always() && runner.os == 'Windows'
+        shell: bash
+        env:
+          GATE_OUTCOME: ${{ steps.native-coexistence-gate.outcome }}
+          # The step's own result, not its reported outcome: continue-on-error
+          # forces the outcome to 'success' even when the diagnostic failed.
+          DIAGNOSTIC_RESULT: ${{ steps.native-diagnostic.outputs.result }}
+          DIAGNOSTIC_OUTCOME: ${{ steps.native-diagnostic.outcome }}
+        run: |
+          echo "Gating five-run acceptance outcome: ${GATE_OUTCOME}"
+          if [ -n "${DIAGNOSTIC_RESULT}" ]; then
+            echo "Sixty-run diagnostic result (non-gating): ${DIAGNOSTIC_RESULT}"
+          else
+            echo "Sixty-run diagnostic result (non-gating): did not report one"
+          fi
+          echo "Reported step outcome for comparison: ${DIAGNOSTIC_OUTCOME}"
+          echo "The job verdict reflects the gating acceptance; the diagnostic never gates."
+
       - name: Record the packaged acceptance verdict
-        if: runner.os == 'Windows'
+        # Runs even when the gate above failed, so the gating verdict is always
+        # recorded rather than skipped along with the rest of the job.
+        if: '!cancelled() && runner.os == ''Windows'''
+
         shell: bash
         env:
           # Read through env so the workflow expression cannot silently evaluate the

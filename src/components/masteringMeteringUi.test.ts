@@ -45,7 +45,8 @@ describe('Phase 45: mixer meter scaling is applied once', () => {
   it('leaves no volume multiplication in the peak pipeline', () => {
     assert.doesNotMatch(MIXER_SOURCE, /peak \* \(t\.volume/, 'fader must not be applied twice');
     assert.doesNotMatch(MIXER_SOURCE, /getMixerTrackPeak\([^\n]*\)[^\n]*\* \(/);
-    assert.match(MIXER_SOURCE, /computeMixerMeterLevel\(audioEngine\.getMixerTrackPeak\(t\.id\), isPlaying\)/);
+    // A deliberately monitored input is audible and metered even with transport stopped.
+    assert.match(MIXER_SOURCE, /computeMixerMeterLevel\(audioEngine\.getMixerTrackPeak\(t\.id\), isPlaying \|\| monitoring\)/);
   });
 });
 

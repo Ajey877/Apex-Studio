@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { MixerTrack, FxSlot, FxType } from '../types/daw';
 import { audioEngine } from '../audio/audioEngine';
+import { audioDeviceManager } from '../audio/audioDeviceManager';
 import { MixerRoutingGraph } from '../audio/mixerRouting';
 import { FxParameterControls } from './fxParameterControls';
 import { MIXER_LEVEL_STOPS, readMixerPalette, trackIdentityLabelColor, useMixerPalette } from './mixerTheme';
@@ -152,6 +153,17 @@ export const Mixer: React.FC<MixerProps> = ({
   onInteractionEnd,
   onCreateAuxReturn
 }) => {
+  const [monitor, setMonitor] = useState(() => audioEngine.liveInputMonitor.getSnapshot());
+  const [inputDevices, setInputDevices] = useState(() => audioDeviceManager.getSnapshot());
+  const [monitorError, setMonitorError] = useState<string | null>(null);
+  useEffect(() => {
+    const detachMonitor = audioEngine.liveInputMonitor.subscribe(() => setMonitor(audioEngine.liveInputMonitor.getSnapshot()));
+    const detachDevices = audioDeviceManager.subscribe(setInputDevices);
+    return () => { detachMonitor(); detachDevices(); audioEngine.liveInputMonitor.stop(); };
+  }, []);
+  const monitoring = monitor.status === 'active';
+  const monitorBusy = monitoring || monitor.status === 'starting';
+  const inputName = inputDevices.inputDevices.find(device => device.deviceId === inputDevices.preferences.inputDeviceId)?.label ?? 'Selected input unavailable';
   const [showAddFxMenu, setShowAddFxMenu] = useState(false);
   const [vst3PickerTarget, setVst3PickerTarget] = useState<{ trackId: number; slotId?: string } | null>(null);
   const [trackPeaks, setTrackPeaks] = useState<number[]>(Array(tracks.length).fill(0));
@@ -259,7 +271,7 @@ export const Mixer: React.FC<MixerProps> = ({
     const updateVisuals = () => {
       // 1. Peak levels for each track
       // Post-fader tap, no second copy of the fader gain (see computeMixerMeterLevel).
-      const peaks = tracks.map(t => computeMixerMeterLevel(audioEngine.getMixerTrackPeak(t.id), isPlaying));
+      const peaks = tracks.map(t => computeMixerMeterLevel(audioEngine.getMixerTrackPeak(t.id), isPlaying || monitoring));
       setTrackPeaks(peaks);
 
       // 2. Master Spectrum Analyzer (Top Bar)
@@ -299,7 +311,7 @@ export const Mixer: React.FC<MixerProps> = ({
           const barCount = 16;
           const barW = faderCanvas.width / barCount;
           for (let i = 0; i < barCount; i++) {
-            const val = isPlaying ? (freqData[i * 4] || 0) : 0;
+            const val = (isPlaying || monitoring) ? (freqData[i * 4] || 0) : 0;
             const barH = (val / 255) * faderCanvas.height;
             faderCtx.fillStyle = livePalette.signal.spectrumBackdrop;
             faderCtx.fillRect(i * barW, faderCanvas.height - barH, barW - 1, barH);
@@ -312,7 +324,7 @@ export const Mixer: React.FC<MixerProps> = ({
 
     animId = requestAnimationFrame(updateVisuals);
     return () => cancelAnimationFrame(animId);
-  }, [tracks, isPlaying]);
+  }, [tracks, isPlaying, monitoring]);
 
   const handleVolumeChange = (trackId: number, val: number) => {
     onUpdateTrack(trackId, { volume: val });
@@ -379,6 +391,9 @@ export const Mixer: React.FC<MixerProps> = ({
                     <span className={`text-[9px] font-bold font-mono ${isSelected ? 'text-[var(--apex-accent)]' : 'text-[var(--apex-text-3)]'}`}>
                       {isMaster ? 'MST' : `INS ${track.id}`}
                     </span>
+                    {!isMaster && <button type="button" title={track.solo ? 'Unsolo insert' : 'Solo insert'} aria-pressed={track.solo}
+                      className="text-[9px] px-1 rounded border border-[var(--apex-border)]"
+                      onClick={event => { event.stopPropagation(); onUpdateTrack(track.id, { solo: !track.solo }); }}>S</button>}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -469,6 +484,21 @@ export const Mixer: React.FC<MixerProps> = ({
 
         {/* Right: Studio FX Rack Inspector */}
         <div className="w-56 sm:w-64 border border-[var(--apex-border)] rounded bg-[var(--apex-chrome-inset)] flex flex-col shrink-0">
+          <section aria-label="Live audio input" className="p-2 border-b border-[var(--apex-border)] text-[10px] text-[var(--apex-text)] space-y-1">
+            <div className="font-bold">LIVE INPUT — {monitoring ? 'ON' : monitor.status === 'failed' ? 'OFF (FAILED)' : 'OFF'}{monitor.status === 'starting' ? ' (authorizing)' : ''}</div>
+            <div>Source: {inputName} (Audio Settings)</div>
+            <div>Insert: {monitorBusy ? tracks.find(track => track.id === monitor.trackId)?.name : selectedTrack.name}</div>
+            <button type="button" className="px-2 py-1 rounded border border-[var(--apex-border)] disabled:opacity-50"
+              disabled={!monitorBusy && (selectedTrack.id === 0 || !!selectedTrack.isAux || !inputDevices.selectedInputAvailable || !inputDevices.capabilities.microphoneCaptureSupported)}
+              onClick={() => {
+                setMonitorError(null);
+                if (monitorBusy) audioEngine.liveInputMonitor.stop();
+                else void audioEngine.startLiveInputMonitoring(selectedTrack.id, tracks).catch(error => setMonitorError(error.message));
+              }}>{monitorBusy ? 'Disable monitoring' : 'Enable monitoring on this insert'}</button>
+            <div role="status">{monitorError ?? monitor.message ?? (!inputDevices.capabilities.microphoneCaptureSupported ? 'Microphone capture is unsupported in this environment.' : !inputDevices.selectedInputAvailable ? 'Selected input unavailable.' : inputDevices.microphonePermission === 'denied' ? 'Microphone permission denied. Allow access in Audio Settings or browser privacy settings.' : inputDevices.microphonePermission !== 'granted' ? 'Microphone permission required. Enable to request access.' : monitor.status === 'active' ? `Active · ${monitor.channels ?? 'device-defined'} channel(s)` : 'Monitoring OFF.')}</div>
+            <p className="text-[var(--apex-text-muted)]">Use headphones to avoid acoustic feedback. Browser/device monitoring delay varies; not zero-latency. Stop disables monitoring.</p>
+            {monitoring && <div>Reported input: {monitor.inputLatency === null ? 'unknown' : `${(monitor.inputLatency * 1000).toFixed(1)} ms`}; engine base: {monitor.baseLatency === null ? 'unknown' : `${(monitor.baseLatency * 1000).toFixed(1)} ms`}; output: {monitor.outputLatency === null ? 'unknown' : `${(monitor.outputLatency * 1000).toFixed(1)} ms`}. Not a measured round trip.</div>}
+          </section>
           <div className="p-2 text-[10px] font-bold border-b border-[var(--apex-border)] flex items-center justify-between text-[var(--apex-text)] bg-[var(--apex-panel-header)]">
             <span className="uppercase tracking-wider">FX SLOTS ({selectedTrack.name.toUpperCase()})</span>
             <div className="flex items-center gap-1">

@@ -51,8 +51,47 @@ function validateEditorRecoveryRecord(value) {
 // Explicit operations only; never accept raw host commands or executable paths
 // from renderer content. The Electron renderer remains sandboxed/isolated.
 function registerVst3({ app, ipcMain, dialog, getWindow }) {
-  const smokeTimingEnabled = process.env.APEX_SMOKE_TEST === '1';
+  const smokeTimingEnabled = process.env.APEX_SMOKE_TEST === '1' || process.env.APEX_SMOKE_TIMING_ONLY === '1';
   const smokeProcessAudioTimings = smokeTimingEnabled ? [] : null;
+  // Main-process event-loop lag, measured only in a timing session. The live PCM
+  // round trip is serviced by this event loop, so a stall here delays audio even
+  // when the helper is idle. Sampling is 10 ms and the timer is unref'd: it can
+  // neither keep the process alive nor affect production, where it never starts.
+  const eventLoopLag = { maxLagMs: 0, samples: 0, startedAtMs: null,
+    maxLagDuringAudioMs: 0, firstAudioAtMs: null, lastAudioAtMs: null };
+  // A bounded ring of the worst stalls with their timestamps. The session maximum
+  // alone cannot show that a stall coincided with an audio block - it may belong
+  // to application start-up and never touch playback - so each block reports the
+  // worst stall inside its own request/response window.
+  const worstLagSamples = [];
+  if (smokeTimingEnabled) {
+    const intervalMs = 10;
+    let expectedAtMs = performance.now() + intervalMs;
+    eventLoopLag.startedAtMs = performance.now();
+    // unref'd: a diagnostic sampler must never hold the process open.
+    const sampler = setInterval(() => {
+      const nowMs = performance.now();
+      const lagMs = nowMs - expectedAtMs;
+      if (lagMs > eventLoopLag.maxLagMs) eventLoopLag.maxLagMs = lagMs;
+      eventLoopLag.samples++;
+      // Keep only stalls that could matter: anything over 1 ms, bounded to the 64
+      // worst, so the ring cannot grow without limit in a long session.
+      if (lagMs > 1) {
+        worstLagSamples.push({ atMs: nowMs, lagMs });
+        if (worstLagSamples.length > 64) {
+          worstLagSamples.sort((x, y) => y.lagMs - x.lagMs);
+          worstLagSamples.length = 32;
+        }
+      }
+      expectedAtMs = nowMs + intervalMs;
+    }, intervalMs);
+    sampler.unref?.();
+  }
+  // Helper start-up forensics for the first block of each effect, so a cold-start
+  // deadline miss can be attributed to spawn/handshake/plug-in load rather than
+  // guessed at from the deadline counter.
+  const helperStartupByEffect = new Map();
+  const helperStartupAttempted = new Set();
   let activeProcessAudioCalls = 0;
   let maximumConcurrentProcessAudioCalls = 0;
   const activeCallsByEffect = new Map();
@@ -295,22 +334,99 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
   handle('describeEffect', (context, owner, effect) => context.service.describeEffect(effect, owner));
   handle('parameters', (context, owner, id, changes) => context.service.parameters(id, changes, owner));
   handle('process', (context, owner, id, frames, events, bpm, parameters) => context.service.process(id, frames, events, bpm, owner, parameters));
+  // Worst recorded event-loop stall whose sample falls inside [fromMs, toMs] on
+  // the main-process monotonic clock. Returns null when no stall was sampled in
+  // that window, which is itself the useful answer: the block was not delayed by
+  // this event loop.
+  const worstLagBetween = (fromMs, toMs) => {
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return null;
+    let worst = null;
+    for (const sample of worstLagSamples) {
+      if (sample.atMs < fromMs || sample.atMs > toMs) continue;
+      if (worst === null || sample.lagMs > worst) worst = sample.lagMs;
+    }
+    return worst;
+  };
   const runProcessAudio = async (context, owner, id, frames, audio, bpm, parameters, rawProfile, ipcTiming) => {
     const profile = readProfile(rawProfile);
     if (!profile) return context.service.processAudio(id, frames, audio, bpm, owner, parameters);
     const serviceStartAtMainMs = performance.now();
     const effectKey = `${profile.trackId}:${profile.slotId}`;
+    // Captured once per effect, never per block: this is a diagnostic read and
+    // must not add work to the steady-state audio path.
+    if (!helperStartupAttempted.has(effectKey)) {
+      helperStartupAttempted.add(effectKey);
+      try {
+        const startup = context.service.helperStartupTimings?.(id, owner);
+        if (startup) helperStartupByEffect.set(effectKey, { firstRequestAtMainMs: serviceStartAtMainMs, ...startup });
+      } catch { /* diagnostics only; never let forensics fail an audio block */ }
+    }
     const activeAtStart = ++activeProcessAudioCalls;
     const activeForEffectAtStart = (activeCallsByEffect.get(effectKey) ?? 0) + 1;
     activeCallsByEffect.set(effectKey, activeForEffectAtStart);
     maximumConcurrentProcessAudioCalls = Math.max(maximumConcurrentProcessAudioCalls, activeAtStart);
     maximumConcurrentCallsPerEffect = Math.max(maximumConcurrentCallsPerEffect, activeForEffectAtStart);
+    // Declared above the try so the catch path can still report whatever the
+    // helper measured before the block failed: a block that errored inside the
+    // plug-in callback is exactly the case where those spans matter most.
+    const helper = {};
     try {
-      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters);
+      const blockStartedAtMainMs = performance.now();
+      const pcm = await context.service.processAudio(id, frames, audio, bpm, owner, parameters, helper);
       const serviceCompletedAtMainMs = performance.now();
+      // Attribute the block's own window: the worst stall sampled between this
+      // block arriving and its result leaving. A stall here delays the round trip
+      // even when the helper answered promptly.
+      const eventLoopLagDuringBlockMs = worstLagBetween(blockStartedAtMainMs, serviceCompletedAtMainMs);
+      if (eventLoopLag.firstAudioAtMs === null) eventLoopLag.firstAudioAtMs = ipcTiming?.ipcReceivedAtMainMs ?? blockStartedAtMainMs;
+      eventLoopLag.lastAudioAtMs = serviceCompletedAtMainMs;
+      if (eventLoopLagDuringBlockMs !== null && eventLoopLagDuringBlockMs > eventLoopLag.maxLagDuringAudioMs) {
+        eventLoopLag.maxLagDuringAudioMs = eventLoopLagDuringBlockMs;
+      }
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
+        ipcReceivedAtMainEpochMs: ipcTiming?.ipcReceivedAtMainEpochMs ?? performance.timeOrigin + serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        // Where the block's budget was actually spent inside the helper channel:
+        // serial-queue wait behind another request, request serialization, the
+        // helper round trip, and response frame parsing.
+        helperQueueWaitMs: helper.queueWaitMs ?? null, helperSerializeMs: helper.serializeMs ?? null,
+        helperRequestBytes: helper.requestBytes ?? null, helperRoundTripMs: helper.helperRoundTripMs ?? null,
+        helperFrameParseMs: helper.frameParseMs ?? null,
+        // Inside the helper: how long the OS left it descheduled after the request
+        // was written, and how long JSON/base64 decode took.
+        helperPipeAndScheduleMs: helper.pipeAndScheduleMs ?? null,
+        helperDecodeMs: helper.helperDecodeMs ?? null,
+        // The helper splits its own per-block work at the host/plug-in boundary.
+        // `helperInstanceProcessMs` is the whole Instance::process(); the three
+        // sub-spans partition it and must not be added to it. The field this
+        // replaces, `helperPluginProcessMs`, was that same total under a name that
+        // read as plug-in execution - it was host-plus-plug-in time.
+        helperInstanceProcessMs: helper.helperInstanceProcessMs ?? null,
+        helperHostPrepareMs: helper.helperHostPrepareMs ?? null,
+        helperPluginCallbackMs: helper.helperPluginCallbackMs ?? null,
+        helperHostCollectMs: helper.helperHostCollectMs ?? null,
+        // Helper-thread CPU time for the same four spans. Wall minus CPU is time the
+        // thread spent descheduled: contention, not expensive code. This thread only
+        // - a plug-in with its own worker threads accounts their CPU elsewhere.
+        helperInstanceProcessCpuMs: helper.helperInstanceProcessCpuMs ?? null,
+        helperHostPrepareCpuMs: helper.helperHostPrepareCpuMs ?? null,
+        helperPluginCallbackCpuMs: helper.helperPluginCallbackCpuMs ?? null,
+        helperHostCollectCpuMs: helper.helperHostCollectCpuMs ?? null,
+        helperCpuTimingSupported: helper.helperCpuTimingSupported ?? null,
+        // Interpretation of a zero *CpuMs. tickObserved false with a supported
+        // clock means the clock did not advance during the span, so the CPU time is
+        // below one observed step - it is NOT zero CPU. The step is the smallest
+        // advance measured at startup, not the clock's exact resolution.
+        helperCpuClockTickObserved: helper.helperCpuClockTickObserved ?? null,
+        helperCpuClockObservedStepMs: helper.helperCpuClockObservedStepMs ?? null,
+        helperProcessFrames: helper.helperProcessFrames ?? null,
+        // A zero-frame flush is not an audio block and is excluded from per-block
+        // statistics rather than dragging the callback median towards zero.
+        helperProcessIsFlush: helper.helperProcessIsFlush ?? null,
+        helperWriteAtMs: helper.writeAtMs ?? null, helperResponseAtMs: helper.responseAtMs ?? null,
+        eventLoopLagMaxMs: eventLoopLag.maxLagMs,
+        eventLoopLagDuringBlockMs,
         nativeInputRms: pcmRms(audio), nativeOutputRms: pcmRms(pcm),
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart, error: null,
       });
@@ -319,7 +435,34 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
       const serviceCompletedAtMainMs = performance.now();
       if (smokeProcessAudioTimings.length < 8192) smokeProcessAudioTimings.push({
         ...profile, frames, ipcReceivedAtMainMs: ipcTiming?.ipcReceivedAtMainMs ?? serviceStartAtMainMs,
+        ipcReceivedAtMainEpochMs: ipcTiming?.ipcReceivedAtMainEpochMs ?? performance.timeOrigin + serviceStartAtMainMs,
         serviceStartAtMainMs, serviceCompletedAtMainMs, nativeServiceCallMs: serviceCompletedAtMainMs - serviceStartAtMainMs,
+        // Whatever the helper managed to report before failing. Fields the helper
+        // never reached stay null rather than zero.
+        helperQueueWaitMs: helper.queueWaitMs ?? null, helperSerializeMs: helper.serializeMs ?? null,
+        helperRoundTripMs: helper.helperRoundTripMs ?? null, helperFrameParseMs: helper.frameParseMs ?? null,
+        helperPipeAndScheduleMs: helper.pipeAndScheduleMs ?? null,
+        helperDecodeMs: helper.helperDecodeMs ?? null,
+        helperInstanceProcessMs: helper.helperInstanceProcessMs ?? null,
+        helperHostPrepareMs: helper.helperHostPrepareMs ?? null,
+        helperPluginCallbackMs: helper.helperPluginCallbackMs ?? null,
+        helperHostCollectMs: helper.helperHostCollectMs ?? null,
+        // Helper-thread CPU time for the same four spans. Wall minus CPU is time the
+        // thread spent descheduled: contention, not expensive code. This thread only
+        // - a plug-in with its own worker threads accounts their CPU elsewhere.
+        helperInstanceProcessCpuMs: helper.helperInstanceProcessCpuMs ?? null,
+        helperHostPrepareCpuMs: helper.helperHostPrepareCpuMs ?? null,
+        helperPluginCallbackCpuMs: helper.helperPluginCallbackCpuMs ?? null,
+        helperHostCollectCpuMs: helper.helperHostCollectCpuMs ?? null,
+        helperCpuTimingSupported: helper.helperCpuTimingSupported ?? null,
+        // Interpretation of a zero *CpuMs. tickObserved false with a supported
+        // clock means the clock did not advance during the span, so the CPU time is
+        // below one observed step - it is NOT zero CPU. The step is the smallest
+        // advance measured at startup, not the clock's exact resolution.
+        helperCpuClockTickObserved: helper.helperCpuClockTickObserved ?? null,
+        helperCpuClockObservedStepMs: helper.helperCpuClockObservedStepMs ?? null,
+        helperProcessFrames: helper.helperProcessFrames ?? null,
+        helperProcessIsFlush: helper.helperProcessIsFlush ?? null,
         nativeInputRms: pcmRms(audio), nativeOutputRms: null,
         activeProcessAudioCallsAtStart: activeAtStart, activeCallsForEffectAtStart: activeForEffectAtStart,
         error: error instanceof Error ? error.message : String(error),
@@ -337,11 +480,17 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
     handle('smokeTimingSnapshot', context => ({
       processAudio: smokeProcessAudioTimings.slice(), maximumConcurrentProcessAudioCalls,
       maximumConcurrentCallsPerEffect, activeProcessAudioCalls, nativeServiceSessionCount: context.service.sessionCount,
+      eventLoopLag: { ...eventLoopLag, worstStalls: worstLagSamples.slice().sort((x, y) => y.lagMs - x.lagMs).slice(0, 8) },
+      helperStartup: Object.fromEntries(helperStartupByEffect),
     }));
     handle('smokeTimingReset', () => {
       smokeProcessAudioTimings.length = 0;
+      eventLoopLag.maxLagMs = 0; eventLoopLag.samples = 0; eventLoopLag.startedAtMs = performance.now();
+      eventLoopLag.maxLagDuringAudioMs = 0; eventLoopLag.firstAudioAtMs = null; eventLoopLag.lastAudioAtMs = null;
+      worstLagSamples.length = 0;
       maximumConcurrentProcessAudioCalls = activeProcessAudioCalls;
       maximumConcurrentCallsPerEffect = Math.max(0, ...activeCallsByEffect.values());
+      helperStartupByEffect.clear(); helperStartupAttempted.clear();
     });
   }
   handle('unbindLiveAudioPort', (context, owner, id) => {
@@ -369,8 +518,17 @@ function registerVst3({ app, ipcMain, dialog, getWindow }) {
           submittedOutputFrame: timing?.submittedOutputFrame,
           dueOutputFrame: timing?.dueOutputFrame,
           dueContextFrame: timing?.dueContextFrame,
+          // The worklet's own submit wall clock, so the main-process record can
+          // show how long the block spent reaching this process.
+          submittedAtEpochMs: timing?.submittedAtEpochMs,
         };
-        return runProcessAudio(context, owner, sessionId, 1024, samples, 120, [], profile, { ipcReceivedAtMainMs: performance.now() });
+        const receivedAtMs = performance.now();
+        return runProcessAudio(context, owner, sessionId, 1024, samples, 120, [], profile, {
+          ipcReceivedAtMainMs: receivedAtMs,
+          // Epoch stamp: comparable with the worklet's submit stamp, which lives
+          // in a different process with a different performance.now() origin.
+          ipcReceivedAtMainEpochMs: performance.timeOrigin + receivedAtMs,
+        });
       },
     });
     try {

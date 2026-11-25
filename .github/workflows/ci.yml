@@ -31,6 +31,15 @@ jobs:
       - name: Desktop security configuration
         run: npm run verify:desktop
 
+      - name: Native helper cold-start timing attribution
+        run: npm run test:native-cold-start
+
+      # Compiles and runs the C++ unit test for the host/plug-in timing split
+      # against the same header the helper ships, so the span attribution is proven
+      # without needing the VST3 SDK or a real plug-in.
+      - name: Native helper host/plugin timing split (C++)
+        run: npm run test:native-timings-cpp
+
       - name: TypeScript check
         run: npm run lint
 

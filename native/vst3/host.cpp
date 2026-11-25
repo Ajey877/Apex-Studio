@@ -27,6 +27,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -150,6 +151,17 @@ std::vector<float> decodePlanarAudio(const std::string& encoded, int frames) {
 #ifdef _WIN32
 #include "editor-host.hpp"
 #endif
+
+// The host/plug-in timing split lives in its own header so the recorder can be
+// unit-tested against the same code the helper ships, rather than against a copy.
+#include "process-timings.hpp"
+
+// Smallest positive advance of the per-thread CPU clock observed by this helper
+// during its one-time startup calibration, in ms, or -1 when no tick was observed.
+// It exists so a zero helper*CpuMs reading can be reported honestly as "below the
+// smallest step we measured" instead of being read as zero CPU. It is a measured
+// observation, not the clock's exact resolution.
+static double g_apexObservedCpuStepMs = -1;
 
 class Instance {
   // Declaration order matters: SDK objects are released BEFORE the module unloads.
@@ -543,7 +555,14 @@ public:
     checkedProcessing(processor->setProcessing(true), "Cannot resume after state capture"); processing = true;
     return state;
   }
-  std::vector<float> process(const json& request, bool flush = false) {
+  std::vector<float> process(const json& request, bool flush = false,
+                             ProcessTimings* timings = nullptr) {
+    // The observed CPU-clock step comes from the one-time startup calibration. It
+    // is never measured here: a busy-wait inside this call would sit inside the
+    // very span being measured.
+    TimingClocks clocks{};
+    clocks.cpuStepMs = g_apexObservedCpuStepMs;
+    ProcessSpanRecorder span(timings, clocks);
     require(processing, "Plugin processing is suspended; reopen instance");
     const int frames = integer(request, "frames", flush ? 0 : 1, kMaxBlock);
     auto inputEvents = request.value("events", json::array());
@@ -625,7 +644,12 @@ public:
     data.inputEvents = &events; data.outputEvents = &outputEvents;
     data.inputParameterChanges = &parameters; data.outputParameterChanges = &outputParameters;
     data.processContext = &context;
+    // Bracket the plug-in callback as tightly as possible: everything the host did
+    // beforehand is already stamped, so host preparation cannot leak into this
+    // span, and the host's own validation below cannot leak in either.
+    span.markCallbackStart();
     checked(processor->process(data), "Plugin process failed");
+    span.markCallbackEnd();
     assertNoActiveProcessRestartFlags(componentHandler->consumeRestartFlags());
     assertPreparedProcessDataMatchesContract();
     // Retain a zero-sample flush for the next audible block too: some SDK
@@ -646,6 +670,7 @@ public:
       }
     }
     cursor += frames;
+    span.finish(frames, flush);
     return pcm;
   }
 };
@@ -657,6 +682,16 @@ public:
 //
 // Frames leave on the dedicated protocol channel (protocol-channel.hpp), never
 // on stdout: stdout and stderr belong to the plug-in and are diagnostics only.
+// Wall clock in epoch milliseconds. system_clock, not steady_clock, because these
+// stamps are compared with the main process's: only a wall clock is comparable
+// across processes. Used purely for cold-start forensics on the "process" path, so
+// a real-time deadline miss can be attributed to the pipe, the JSON/base64 decode
+// or the plug-in's own process() instead of to "the helper" as a whole.
+inline double apexEpochMs() {
+  return std::chrono::duration<double, std::milli>(
+    std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 void reply(const json& message, const std::vector<float>& pcm = {}) {
   const auto text = message.dump();
   require(text.size() <= 5 * 1024 * 1024, "VST3 helper response exceeds 5 MiB limit");
@@ -725,6 +760,15 @@ int main(int argc, char** argv) {
   auto com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
   if (FAILED(com)) return 2;
 #endif
+  // One-time CPU-clock calibration, before any plug-in instance exists and well
+  // before audio starts, so its busy-wait can never land inside a measured block.
+  // Returns as soon as the first clock advance is seen (typically one tick), or -1
+  // if none arrived inside the budget.
+  g_apexObservedCpuStepMs = measureCpuClockStepMs(100.0);
+  std::fprintf(stderr,
+               "apex-vst3-host: observed CPU clock step %.6f ms%s\n",
+               g_apexObservedCpuStepMs,
+               g_apexObservedCpuStepMs < 0 ? " (no tick observed: unknown)" : "");
   PlugProvider::setErrorStream(&std::cerr);
   // stdout and stderr are diagnostic streams. Plug-in debug output on either
   // is drained by the parent and can never be interpreted as a response or a
@@ -769,6 +813,11 @@ int main(int argc, char** argv) {
       if (line.empty() && !std::cin) break;
     }
 
+    // Stamped before parsing: the gap between the main process writing the request
+    // and this line arriving is pipe transfer plus however long the OS left this
+    // helper descheduled, which is the part no main-process measurement can see.
+    const double requestLineReadAtMs = apexEpochMs();
+    const double requestLineReadMonoMs = monotonicMs();
     std::string command;
     try {
       auto request = json::parse(line);
@@ -953,8 +1002,45 @@ int main(int argc, char** argv) {
 #endif
       } else if (command == "process") {
         require(bool(instance), "No plugin instance loaded");
-        auto pcm = instance->process(request);
-        reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2}}, pcm);
+        // JSON parsing and command extraction have already happened, so the decode
+        // span below is monotonic and contains no cross-process component.
+        const double decodeStartMonoMs = monotonicMs();
+        ProcessTimings timings{};
+        auto pcm = instance->process(request, false, &timings);
+        // RENAMED: this response used to carry `helperPluginProcessMs` for the whole
+        // of Instance::process(). That value was host-plus-plug-in time, and reading
+        // it as plug-in execution was wrong. It is now `helperInstanceProcessMs`,
+        // with the plug-in callback isolated in `helperPluginCallbackMs`.
+        reply({{"ok", true}, {"frames", pcm.size() / 2}, {"channels", 2},
+               // Cross-process correlation only - both are wall clock.
+               {"helperRequestLineReadAtMs", requestLineReadAtMs},
+               {"helperRepliedAtMs", apexEpochMs()},
+               // Intra-process durations, all monotonic. The three sub-spans
+               // partition helperInstanceProcessMs and must not be added to it.
+               {"helperDecodeMs", decodeStartMonoMs - requestLineReadMonoMs},
+               {"helperInstanceProcessMs", timings.instanceProcessMs},
+               {"helperHostPrepareMs", timings.hostPrepareMs},
+               {"helperPluginCallbackMs", timings.pluginCallbackMs},
+               {"helperHostCollectMs", timings.hostCollectMs},
+               // Helper-THREAD CPU time for the same four spans. These exclude time
+               // the thread spent descheduled, so wall-minus-CPU is contention
+               // rather than expensive code. They cover this thread only: a plug-in
+               // with its own worker threads would account their CPU elsewhere.
+               {"helperInstanceProcessCpuMs", timings.instanceProcessCpuMs},
+               {"helperHostPrepareCpuMs", timings.hostPrepareCpuMs},
+               {"helperPluginCallbackCpuMs", timings.pluginCallbackCpuMs},
+               {"helperHostCollectCpuMs", timings.hostCollectCpuMs},
+               {"helperCpuTimingSupported", timings.cpuTimingSupported},
+               // Interpretation of a zero *CpuMs above. cpuClockTickObserved false
+               // with a supported clock means the clock did not advance during the
+               // span, so the true CPU time is below one observed step - it does
+               // NOT mean no CPU was used. cpuClockObservedStepMs is the smallest
+               // advance measured at startup; it is not the clock's exact
+               // resolution and must not be reported as one.
+               {"helperCpuClockTickObserved", timings.cpuClockTickObserved},
+               {"helperCpuClockObservedStepMs", timings.cpuClockObservedStepMs},
+               {"helperProcessFrames", timings.frames},
+               {"helperProcessIsFlush", timings.flush}}, pcm);
       } else if (command == "parameters") {
         require(bool(instance), "No plugin instance loaded");
         // Instruments retain the established zero-sample flush contract. Audio
