@@ -107,7 +107,17 @@ test('Mixer worklet rejects stale/out-of-order sequence data without replacing t
 test('Mixer worklet bounds a saturated request queue and fails closed instead of replaying stale or dry PCM', () => {
   const { processor, next, sendResult } = createWorklet();
   for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.equal(processor.pending, 0, 'block 0 is in flight');
+  // Block 0 is due at output frame VST3_FX_PIPELINE_FRAMES. Rendering up to that
+  // frame is still inside its deadline, so when the second block completes it waits
+  // instead of failing: a result can still arrive between these two callbacks, which
+  // is the only place the audio thread can deliver one.
   for (let i = 0; i < VST3_FX_BLOCK_FRAMES / 128; i++) next();
+  assert.equal(processor.failed, false, 'the pending block is not due until the next quantum');
+  assert.equal(processor.outputFrame, VST3_FX_PIPELINE_FRAMES);
+  assert.equal(processMessages(processor).length, 1, 'one pending block is the hard in-flight bound');
+  // The next quantum starts on block 0's due frame. Still no result: fail closed.
+  next();
   assert.equal(processor.failed, true);
   assert.equal(processMessages(processor).length, 1, 'one pending block is the hard in-flight bound');
   assert.equal(profileMessages(processor, 'pending-deadline-miss').length, 1);

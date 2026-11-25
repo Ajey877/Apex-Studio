@@ -87,6 +87,11 @@ export const VST3_FX_PIPELINE_FRAMES = VST3_FX_BLOCK_FRAMES * 2;
  * become silence and an explicit stop/failure, never dry or stale PCM.
  */
 export const VST3_FX_WORKLET_SOURCE = `
+// The pending guard's fail-closed message, shared by both of its paths so a
+// listener cannot tell them apart by text - the event fields say which sample
+// tripped it. Declared inside this source: the worklet is evaluated in its own
+// scope and cannot see the module that ships it.
+const PENDING_DEADLINE_MISSED = 'Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.';
 class ApexVst3FxProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
@@ -210,6 +215,77 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     this.dryReady.clear();
     this.port.postMessage({ type: 'failure', reason });
   }
+  /** Output frame at which the block this.pending refers to is first needed. */
+  pendingDueOutputFrame() {
+    return this.delayFrames + this.pending * this.blockFrames;
+  }
+  /**
+   * One report for both fail-closed paths of the pending guard, so the event keeps
+   * a single shape whichever sample tripped it. Argument i is the input sample the
+   * guard was evaluated on and quantumFrames the render quantum length; every frame
+   * below is derived from those two plus this.outputFrame, which only advances
+   * after the whole quantum.
+   */
+  reportPendingDeadlineMiss(i, quantumFrames) {
+    if (!this.profileEnabled) return;
+    this.port.postMessage({ type: 'profile', event: 'pending-deadline-miss', sequence: this.pending,
+      pendingSequence: this.pending, nextSequence: this.sequence, inputContextFrame: currentFrame + i,
+      // outputFrameAtQuantumStart is this.outputFrame at quantum entry, i.e. the
+      // frame the quantum STARTS at; currentOutputFrame is the frame actually being
+      // evaluated, outputFrameAtQuantumStart + i. nextQuantumOutputFrame is where
+      // the next quantum begins. Nothing is inferred: these are the counters as
+      // they stand at the sample that tripped the guard.
+      outputFrameAtQuantumStart: this.outputFrame,
+      inputSampleIndex: i,
+      inputQuantumFrames: quantumFrames,
+      currentOutputFrame: this.outputFrame + i,
+      nextQuantumOutputFrame: this.outputFrame + quantumFrames,
+      dueOutputFrame: this.pendingDueOutputFrame(),
+      readySequences: Array.from(this.ready.keys()), drySequences: Array.from(this.dryReady.keys()) });
+  }
+  /**
+   * Hand the block that is complete in this.left/this.right to the native helper.
+   * Argument i is the input sample whose consumption completed it, or 0 when it
+   * completed on the last sample of the previous quantum and is being handed off at
+   * the start of this one. Extracted so the deferred path and the immediate path stay one
+   * implementation; it is a prototype method, not a closure, so the real-time loop
+   * allocates nothing extra per quantum.
+   */
+  submitFilledBlock(i) {
+    const samples = new Float32Array(this.blockFrames * 2);
+    samples.set(this.left, 0);
+    samples.set(this.right, this.blockFrames);
+    const sequence = this.sequence++;
+    const inputBlockStartContextFrame = currentFrame + i + 1 - this.blockFrames;
+    const submittedContextFrame = currentFrame + i + 1;
+    const submittedOutputFrame = this.outputFrame + i + 1;
+    const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
+    // Epoch wall clock, not performance.now(): the worklet and the main
+    // process have different time origins, so only timeOrigin + now is
+    // comparable across them. This is what lets a deadline miss be split
+    // into renderer->main, helper round trip and main->renderer legs.
+    const submittedAtEpochMs = this.profileEnabled ? this.epochNowMs() : null;
+    this.pendingSubmittedAtEpochMs = submittedAtEpochMs;
+    const timing = { sequence, inputBlockStartContextFrame, submittedContextFrame, submittedOutputFrame,
+      dueOutputFrame, dueContextFrame: this.nodeStartContextFrame + dueOutputFrame,
+      ...(submittedAtEpochMs === null ? {} : { submittedAtEpochMs }) };
+    this.dryReady.set(sequence, samples.slice());
+    this.pending = sequence;
+    if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });
+    const payload = { type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) };
+    if (this.livePort) {
+      // Cross-process MessagePort (AudioWorklet -> Electron MessagePortMain)
+      // structured-clones typed arrays over Mojo; transferring ArrayBuffer
+      // across OS processes is unsupported by Chromium BlinkTransferableMessage.
+      this.livePort.postMessage(payload);
+    } else if (!this.requireLivePort) {
+      this.port.postMessage(payload, [samples.buffer]);
+    } else {
+      this.fail('Live audio port is not bound.');
+      return;
+    }
+    this.fill = 0;
+  }
   process(inputs, outputs) {
     const out = outputs[0];
     if (!out || out.length < 2) return true;
@@ -229,73 +305,53 @@ class ApexVst3FxProcessor extends AudioWorkletProcessor {
     // so plugin tails drain and output sequence/deadline accounting stays exact.
     if (!left || !right) left = right = this.silentInput;
     if (left && right) {
-      for (let i = 0; i < left.length; i++) {
-        this.left[this.fill] = left[i];
-        this.right[this.fill] = right[i];
-        this.fill++;
-        if (this.fill === this.blockFrames) {
-          if (this.pending !== -1) {
-            // Measurement only: the guard and its fail-closed behaviour below are
-            // unchanged. The extra fields distinguish a genuinely late result from
-            // an early pending-state guard. readySequences and drySequences show
-            // what had actually arrived, and pendingSequence repeats the pending
-            // block explicitly so the two failure events carry the same vocabulary.
-            if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'pending-deadline-miss', sequence: this.pending,
-              pendingSequence: this.pending, nextSequence: this.sequence, inputContextFrame: currentFrame + i,
-              // Frame bookkeeping, unambiguous by construction. this.outputFrame
-              // advances only AFTER the whole render quantum, so inside this loop it
-              // is the frame the quantum STARTS at - not the frame being evaluated.
-              // This guard runs at input sample index i, whose output frame is
-              // outputFrame + i, and that is what currentOutputFrame now reports.
-              // MEANING CHANGED, deliberately: currentOutputFrame used to carry the
-              // quantum-start frame. The old value is preserved verbatim under
-              // outputFrameAtQuantumStart, so no reader loses it. Because the
-              // 1024-frame block fills on the LAST sample of a 128-frame quantum,
-              // the two differ by inputQuantumFrames - 1, and nextQuantumOutputFrame
-              // is the frame the pending block is actually first needed at.
-              outputFrameAtQuantumStart: this.outputFrame,
-              inputSampleIndex: i,
-              inputQuantumFrames: left.length,
-              currentOutputFrame: this.outputFrame + i,
-              nextQuantumOutputFrame: this.outputFrame + left.length,
-              dueOutputFrame: this.delayFrames + this.pending * this.blockFrames,
-              readySequences: Array.from(this.ready.keys()), drySequences: Array.from(this.dryReady.keys()) });
-            this.fail('Native effect missed its real-time processing deadline; playback stopped rather than replaying stale PCM.');
-            break;
+      const quantumFrames = left.length;
+      // A block that filled on the LAST sample of the previous quantum while its
+      // predecessor's result was still outstanding is resolved here, before any
+      // input is consumed. This is the correction. The guard used to fail at the
+      // filling sample, which is exactly one output frame BEFORE the pending
+      // block's due frame, so a result delivered between process() calls - the
+      // only place the audio thread can deliver one - was refused even though the
+      // block was not needed until this very frame. The wait now ends on the frame
+      // that actually needs the block: either the result arrived and the waiting
+      // block is handed off, or it did not and the effect fails closed. Nothing
+      // here waits, retries or substitutes audio; it only stops deciding early.
+      if (this.fill === this.blockFrames) {
+        if (this.pending !== -1) {
+          this.reportPendingDeadlineMiss(0, quantumFrames);
+          this.fail(PENDING_DEADLINE_MISSED);
+        } else {
+          this.submitFilledBlock(0);
+        }
+      }
+      if (!this.failed) {
+        for (let i = 0; i < quantumFrames; i++) {
+          this.left[this.fill] = left[i];
+          this.right[this.fill] = right[i];
+          this.fill++;
+          if (this.fill === this.blockFrames) {
+            if (this.pending !== -1) {
+              // The previous block's result is still outstanding. Fail only if
+              // that block is already due at this sample. Otherwise wait, so a
+              // result landing between process() calls can still be taken.
+              //
+              // Waiting is only possible on the last sample of a quantum: holding
+              // a full block mid-quantum would mean dropping input, so any other
+              // position fails closed exactly as before. With a 1024-frame block
+              // and a 128-frame render quantum the block always fills on a
+              // quantum's last sample, and every due frame is a multiple of the
+              // block size and therefore a quantum boundary - so the wait is
+              // always resolved by the check above, on the due frame itself.
+              if (i < quantumFrames - 1 ||
+                  this.outputFrame + i >= this.pendingDueOutputFrame()) {
+                this.reportPendingDeadlineMiss(i, quantumFrames);
+                this.fail(PENDING_DEADLINE_MISSED);
+                break;
+              }
+            } else {
+              this.submitFilledBlock(i);
+            }
           }
-          const samples = new Float32Array(this.blockFrames * 2);
-          samples.set(this.left, 0);
-          samples.set(this.right, this.blockFrames);
-          const sequence = this.sequence++;
-          const inputBlockStartContextFrame = currentFrame + i + 1 - this.blockFrames;
-          const submittedContextFrame = currentFrame + i + 1;
-          const submittedOutputFrame = this.outputFrame + i + 1;
-          const dueOutputFrame = this.delayFrames + sequence * this.blockFrames;
-          // Epoch wall clock, not performance.now(): the worklet and the main
-          // process have different time origins, so only timeOrigin + now is
-          // comparable across them. This is what lets a deadline miss be split
-          // into renderer->main, helper round trip and main->renderer legs.
-          const submittedAtEpochMs = this.profileEnabled ? this.epochNowMs() : null;
-          this.pendingSubmittedAtEpochMs = submittedAtEpochMs;
-          const timing = { sequence, inputBlockStartContextFrame, submittedContextFrame, submittedOutputFrame,
-            dueOutputFrame, dueContextFrame: this.nodeStartContextFrame + dueOutputFrame,
-            ...(submittedAtEpochMs === null ? {} : { submittedAtEpochMs }) };
-          this.dryReady.set(sequence, samples.slice());
-          this.pending = sequence;
-          if (this.profileEnabled) this.port.postMessage({ type: 'profile', event: 'worklet-submit', ...timing });
-          const payload = { type: 'process', sequence, samples, ...(this.profileEnabled ? { timing } : {}) };
-          if (this.livePort) {
-            // Cross-process MessagePort (AudioWorklet -> Electron MessagePortMain)
-            // structured-clones typed arrays over Mojo; transferring ArrayBuffer
-            // across OS processes is unsupported by Chromium BlinkTransferableMessage.
-            this.livePort.postMessage(payload);
-          } else if (!this.requireLivePort) {
-            this.port.postMessage(payload, [samples.buffer]);
-          } else {
-            this.fail('Live audio port is not bound.');
-            break;
-          }
-          this.fill = 0;
         }
       }
     }
