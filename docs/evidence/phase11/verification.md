@@ -1485,10 +1485,56 @@ finished with roughly 10 ms to spare and the result was still refused.
 
 These are two runs on two commits and are reported separately; the eight are not pooled into one rate.
 
+### `ead88bb` — the one-frame correction, and what the evidence looks like afterwards
+
+The pending guard no longer decides early. A block that completes while its predecessor's result is
+still outstanding now waits, and the wait is resolved at the start of the next `process()` call,
+before any input is consumed: either the result arrived and the waiting block is handed off, or it did
+not and the effect fails closed on the frame that actually needs the block.
+
+**Packaged Windows live-input / native VST3 coexistence acceptance: PASS 5/5** (run `45579668931`, job
+`139086235760`, step 19, 08:57:56 → 09:01:21Z), `deadlineMisses 0`, `tightestMarginMs 8.33`,
+`slowestBlockMs 13`. All five workflows at this commit are success. Editor acceptance 10 PASS / 0 FAIL
+/ 1 NOT_VERIFIED (`p9b-multi-monitor`). Artifacts: diagnostic `15009028150` (662,949 B), packaged VST3
+`15009493301` (464,598 B), native monitoring `15006991395` (40,299 B), live input `15006093134`
+(1,392 B), Windows package `15010181165` (176,459,148 B).
+
+The 60-repetition diagnostic that the workflow runs on its own measured **57 PASS / 3 FAIL**
+(repetitions 15, 21, 35). No extra campaign was launched for this change.
+
+**The failure shape changed, and that — not the count — is the evidence that the defect is gone.** Every
+one of the three now reports:
+
+```
+framesBeforeDue: 0, currentOutputFrame 3072, dueOutputFrame 3072,
+outputFrameAtQuantumStart 3072, inputSampleIndex 0,
+rejection { reason "after-failure", recvFrame 3200, dueFrame 3072 }
+```
+
+Before the correction the eight failures at `3c3817d` and `25c5b20` all reported `framesBeforeDue: 1`
+with `recvFrame == dueFrame` — the guard fired one frame early and the result was refused *at* the
+frame the block was needed. Now the guard fires *at* the due frame and the result is delivered one
+whole quantum later, at frame 3200. Failing closed on those is correct: the block was needed at 3072
+and was not there.
+
+**The remaining three are a different problem and this change does not address it.** Their helper round
+trips were 10.57, 13.02 and 13.93 ms against a 21.33 ms budget, so the native helper was not the
+bottleneck; the time went somewhere between the helper's response and the worklet's message handler.
+That is unexplained and is not claimed to be fixed.
+
+The 3/60 count is also not an improvement to celebrate: `3635c6b` measured 0/60 on unfixed code, so the
+run-to-run spread already covers this range. What is comparable across commits is the shape of the
+evidence, and that changed exactly as the correction predicts.
+
 ### Still NOT VERIFIED
 
-- **The cold-start real-time deadline defect is unfixed.** Nothing in the boundary investigation
-  changed production behaviour, by design. At `a75cb15` the production gate FAILED on repetition 1 —
+- **The one-frame-early pending guard is fixed at `ead88bb`** — see the section above — but the
+  cold-start deadline failures are **not** eliminated. Three of sixty repetitions still failed there,
+  each with the result delivered a whole quantum after its due frame while the helper round trip was
+  comfortably inside budget. Whatever delays the result between the helper's response and the worklet's
+  message handler is unexplained and unfixed.
+- The state before that correction, kept for the record: **the cold-start real-time deadline defect was
+  unfixed.** Nothing in the boundary investigation changed production behaviour, by design. At `a75cb15` the production gate FAILED on repetition 1 —
   warm-up timeout with `deadlineMisses 1` — and at `2d4befd` it passed 5/5, so the gate does not
   resolve the defect either way. The results across this branch's commits do not agree, and that
   disagreement is the honest summary: gate 5/5 at `bbfbfa9`, gate FAIL at `a75cb15`, gate 5/5 at
