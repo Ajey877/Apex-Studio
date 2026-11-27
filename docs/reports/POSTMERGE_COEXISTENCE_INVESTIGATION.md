@@ -510,3 +510,46 @@ Nothing in this PR changes that, and this PR is not a fix. What it now has is a
 numbers, that matches the seven-link chain in §3 link for link — and a test suite
 that fails if any of those links changes. The measurement-design decision in §4
 is now the only open question, and it is a product decision, not a bug.
+
+---
+
+## 10. Final tally: three packaged runs, one source
+
+All three runs below executed **byte-identical** `src/`, `native/`, `scripts/`
+and `.github/`. `nativeVst3EffectRuntime.ts` is the same blob
+`5cf8a20492510b83f8dfe83a81c08bab1b514485` in every one, and at `main`
+`98b8e81`. The runs differ only in this report, and this report is not built
+into the application.
+
+| run | job | gating 5-rep coexistence | 60-rep diagnostic | editor (step 23) |
+|---|---|---|---|---|
+| `45964493931` | `140389814676` | **PASS 5/5** | **PASS 60/60** | PASS |
+| `45971762495` | `140413641840` | **FAIL** (first rep) | **PASS 60/60** | SKIP |
+| `45979158807` | `140438344515` | **PASS 5/5** | **PASS 60/60** | PASS |
+
+Every `deadlineMisses=0` and `nativeFailures=0` on every passing lane. No helper
+process leaked on any run that reached shutdown.
+
+### The numbers that matter
+
+- The 60-repetition diagnostic passed **60/60 three times** — 180 clean
+  repetitions — and the 5-repetition gate still failed once in three.
+- The one gate failure happened on its **first** repetition, 1 h 20 m after a
+  clean 60/60, and was a **28 ms** round trip against a 21.33 ms budget.
+- Observed gate verdicts on unchanged production code: **2 pass / 1 fail**,
+  consistent with the §4 model's `P(gate 5/5) ≈ 0.70`.
+
+This is the whole finding in one line: **the scenario is healthy and the
+instrument is noisy**, and 180 consecutive clean repetitions do not make the next
+single repetition predictable.
+
+### Remaining, honestly
+
+- Physical hardware: NOT VERIFIED. Fake capture fixture, deterministic insert
+  buffer. No acoustic equivalence claimed.
+- Evidence zips: NOT VERIFIED, contents never read (blob host outside this
+  environment's allowlist).
+- Whether the CI contention can be removed: NOT VERIFIED, needs a different
+  runner.
+- The gate's aggregation policy: **OPEN, and a product decision.** Options A, B
+  and C in §4 are unchanged and none was taken unilaterally.
