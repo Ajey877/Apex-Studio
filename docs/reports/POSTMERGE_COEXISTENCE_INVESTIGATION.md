@@ -830,3 +830,47 @@ same instrument reading the same disease at different sampling rates.
 **Nothing here is a case for changing the gate, the guard or the acceptance in
 this PR.** It is a case for the measurement-design decision in §4 being made
 deliberately, with these numbers in hand.
+
+---
+
+## 14. Final CI state on `0e269ff`, and one unrelated pre-existing flake
+
+| check | verdict | note |
+|---|---|---|
+| `verify` (Apex Studio CI) | **pass** | |
+| `audio-tests` | **pass** | |
+| `Native DSP (ubuntu-latest)` | **pass** | |
+| `windows-package` (Desktop Validation) | **pass** | step 19 PASS 5/5; diagnostic 57/60 |
+| `Native DSP (windows-latest)` | **fail** | step 10, see below |
+
+The `windows-package` lane — the one this investigation concerns — is **green**,
+with the gating coexistence at **5/5** and the non-gating diagnostic at **57/60**.
+That is the fifth consecutive per-run diagnostic sample on this build: 4, 9, 5, 1,
+3 failures in 60.
+
+### The one red check is not from this PR
+
+`Native DSP (windows-latest)` failed at step 10, *"Prove editor/audio helper
+process separation with real PIDs"*:
+
+```
+FAILED: the editor helper was a separate, live OS process from the audio helper ::
+{"audioHelperPid":4224,"editorHelperPid":6072,"editorAlive":false,"audioAlive":true,"editorCmdline":[]}
+```
+
+The editor helper process had exited by the time liveness was probed
+(`editorAlive: false`, empty `editorCmdline`). This is a native helper-lifetime
+race in a lane this PR does not touch:
+
+- the only two files this PR changes are
+  `src/audio/nativeVst3DeadlineLatch.test.ts` (a test file, not built into the
+  packaged application) and this report;
+- the **same job passed on the previous head `2407baa`** (`46025549956`), and
+  `git diff 2407baa 0e269ff -- src native scripts .github` is **empty** — the only
+  difference between the passing and failing runs is this document;
+- steps 6–9 of the same job all passed, so native DSP, Mixer latency
+  compensation, DAW integration and the editor session contract are green.
+
+It is recorded here rather than dismissed because it is a genuine intermittent
+defect in the editor helper's process separation. It is simply not this PR's, and
+this PR does not fix it.
