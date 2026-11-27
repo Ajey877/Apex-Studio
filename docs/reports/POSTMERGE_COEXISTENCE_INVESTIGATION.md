@@ -219,7 +219,8 @@ contention:
 | `75d696f`, 60 reps | 1 | 0.017 | 0.92 |
 | `68cdd20`, 37 reps | 1 | 0.027 | 0.87 |
 | `71013f7`, 60 reps | 4 | 0.067 | 0.71 |
-| **pooled** | **19 / 277** | **0.069** | **0.70** |
+| `20b7637`, 60 reps | 9 | 0.150 | 0.44 |
+| **pooled** | **24 / 337** | **0.071** | **0.69** |
 
 **Read the ≈30 % figure as an estimate under an assumed model, not a measured
 universal probability.** It follows only if two things hold: each repetition is
@@ -740,12 +741,79 @@ Three things follow directly.
 
 ### Consequence for the estimate
 
-Pooling this sample moves the point estimate barely at all — `19/277 = 6.9 %`,
-exactly where it was — and it strengthens the case for reporting `p` as a
-**mixture over runner load states** rather than a single number. Four failures in
-one 60-run survey and zero in the two adjacent ones is the non-stationarity the
-§4 caveat describes, observed directly.
+Pooling this sample moves the point estimate barely at all — `24/337 = 7.1 %`
+once §13's sample is included — and it strengthens the case for reporting `p` as
+a **mixture over runner load states** rather than a single number. Four failures
+in one 60-run survey and zero in the earlier ones is the non-stationarity the §4
+caveat describes, observed directly; §13 adds the adjacent 9/60 that makes it
+unmistakable.
 
 It also settles the practical question the PR was opened with: **a green gate on
 this tree does not mean the underlying misses stopped**, and this run is the
 clean demonstration.
+
+---
+
+## 13. Two adjacent runs on the same source: 4/60 then 9/60, and a gate that failed at 2/5
+
+The documentation-only commits that followed §12 re-ran the packaged job twice more.
+The results, on source that is identical apart from this document:
+
+| run | job | gating lane | 60-rep diagnostic | max event-loop lag |
+|---|---|---|---|---|
+| `45997738133` | `140501287719` | **PASS 5/5** | **4/60**, `[1, 33, 39, 54]` | 72.39–78.06 ms |
+| `46006658995` | `140531403200` | **FAIL 2/5** | **9/60**, `[1, 10, 20, 51, 56, 59]` | 60.74–70.25 ms |
+
+Both jobs ran the same build. The second failed the gate at **2 of 5** — three
+repetitions were lost to the warmup — and its diagnostic recorded **nine**
+failures, more than twice the first run's four.
+
+### What this does to the model
+
+The pooled point estimate barely moves (`24/337 = 7.1 %`, essentially unchanged
+from 6.9 %), and the model *predicts* that a gate can fail at any `k ≥ 1`. So the
+failure itself is not surprising.
+
+What it does show is the thing §4 warned about and could not previously
+demonstrate at this strength: **`p` is not stationary.** Back-to-back runs of one
+binary produced 4/60 and 9/60. The earlier four-in-60-then-0 pair said the same;
+this pair says it twice as loudly, in the opposite direction. A single `p`
+therefore understates the problem for a gate, because the gate's failure
+probability is `1 - (1 - p_thisrun)^5` evaluated on *that run's* `p`, and
+`p_thisrun` varied by more than 2× between adjacent jobs.
+
+That is also the strongest support yet for the **contention** hypothesis in §4,
+and it is still support rather than isolation: the lag figures sit in one band
+(60–78 ms) across all sampled runs while the failure counts vary, so lag is
+necessary-looking but not decisive on its own, and load was never held constant.
+
+### Every failure in both samples has the same anatomy
+
+All thirteen captured failures across the two surveys were rejected as
+`after-failure`, so **no stale PCM was replayed in any of them**, and:
+
+- **twelve of thirteen missed sequence 2** at due frame 4096, received at 4224 —
+  one render quantum late, in the helper's cold window;
+- **seven of them recorded a round trip inside the 21.33 ms budget** — 18, 19, 19,
+  22, 23, 24 and 26 ms — and missed anyway, because they arrived a quantum late;
+- run 51 has an empty `rejections` array, i.e. the result was never correlated to
+  an accepted one, which is the documented capture behaviour for a rejected
+  delivery rather than a distinct fault.
+
+The round-trip distribution here (mostly 18–26 ms against a 21.33 ms budget)
+explains the whole phenomenon in one sentence: **the helper's round trip sits
+*at* the budget during cold start, so anything that delays delivery past a
+quantum boundary converts a normal trip into a missed deadline.** That is why the
+plug-in callback time is irrelevant, why a pre-warm was a plausible but partial
+mitigation, and why event-loop lag on the shared runner matters.
+
+### Consequence
+
+A green gate on this tree means the run was lucky, not that the misses stopped —
+§12 showed the gate passing while the survey failed, and this section shows the
+survey failing twice as hard one job later with the gate going red. Both are the
+same instrument reading the same disease at different sampling rates.
+
+**Nothing here is a case for changing the gate, the guard or the acceptance in
+this PR.** It is a case for the measurement-design decision in §4 being made
+deliberately, with these numbers in hand.
