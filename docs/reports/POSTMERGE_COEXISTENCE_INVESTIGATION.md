@@ -157,16 +157,40 @@ freeze the count — and the source shows both happen on the same event.
 The obvious candidates were each eliminated against the project's own evidence
 and the constraints under which this work was commissioned.
 
-**Not a defect in this repository's audio code.** The 60-run diagnostic has
-instrumented eight failures with a full decomposition. The plug-in callback
-`processor->process(data)` never exceeded **0.03 ms** — in a failing block or
-any neighbour. The time is host work and OS scheduling spread across processes,
-and there is **no single contributor**: across the eight, host preparation
+These candidates are separated by how much is actually established, because the
+three categories are not interchangeable.
+
+**PROVEN — the fail-closed path is not the defect.** What is proven is the chain
+in §3: a late result trips the guard, the entry is faulted and disposed,
+`onFatal` stops the transport, and the warmup then cannot be satisfied. Every
+link of that is executed in the tests on this branch or cited in the shipped
+source. Nothing in that chain is broken behaviour; it is the guarantee working.
+
+**PROVEN — the plug-in itself did not cause the latency.** The 60-run
+diagnostic has instrumented eight failures with a full decomposition, and
+`processor->process(data)` — the plug-in callback alone — never exceeded
+**0.03 ms**, in a failing block or any neighbour.
+
+**SUPPORTED BUT NOT ISOLATED — host/OS scheduling contention is the likely
+explanation for the latency outlier.** The time is spread across host work and
+OS scheduling with **no single contributor**: across the eight, host preparation
 spiked to 13.26 and 12.59 ms, output collection to 7.68 ms, pipe plus OS
 scheduling to 15.85 and 14.28 ms, main→renderer to 9.71 ms, and main-thread
-event-loop lag reached 10.48 ms. That is contention on a shared CI runner, and
-the failing run's own `mainEventLoopLagMaxMs=71.12` (against 48.88–55.09 ms on
-the passing run of the *same tree*) is consistent with it.
+event-loop lag reached 10.48 ms. The failing run's own
+`mainEventLoopLagMaxMs=71.12` (against 48.88–55.09 ms on the passing run of the
+*same tree*) is consistent with contention. **Consistent with** is the correct
+strength: no experiment here holds load constant and varies one component, so
+contention is the leading hypothesis that fits all the observations, not a
+localised cause. A pre-warm addresses only the cold window and would not explain
+the mid-session misses below, which is part of why it was never adopted.
+
+**STILL UNRESOLVED — whether this is specific to hosted CI runners.** Nothing in
+this investigation measures an ordinary user's machine. It is entirely possible
+that the same latency outlier can occur under real-world load — a thermal-throttled
+laptop, a busy audio interface driver, a machine under memory pressure — and if it
+does, **a genuine missed deadline still stops playback.** The fail-closed design
+means that outcome is a correct refusal, but it is a DAW reliability risk for the
+user regardless, and this PR does not remove it. It only makes it diagnosable.
 
 **The miss is not even confined to cold start.** The guard-named sequences across
 those failures were 0, 2, 2, 2, 3, 3, **57** and **149** — two of eight well
@@ -196,12 +220,21 @@ contention:
 | `68cdd20`, 37 reps | 1 | 0.027 | 0.87 |
 | **pooled** | **15 / 217** | **0.069** | **0.70** |
 
-Roughly a **30 % chance of a red gate on correct, unchanged code** — which is
-exactly the run-to-run spread the project's own record already describes ("two
-consecutive runs of the same binary measured 4 failures in 60 and then 0"). The
-caveat is that the 60-run diagnostic executes at a different point in the job
-than the gating 5 runs, so these are estimates of `p`, not a direct measurement
-of the gate.
+**Read the ≈30 % figure as an estimate under an assumed model, not a measured
+universal probability.** It follows only if two things hold: each repetition is
+independent, and `p` is stationary (constant across runs and load conditions).
+Under that model, `1 - (1 - 0.069)^5 ≈ 0.30`. Neither assumption is established.
+The observed 2-pass / 1-fail record over three runs is far too small to test
+them, and the recorded 4-in-60-then-0 on byte-identical code is itself evidence
+that `p` is *not* stationary — it moves with runner load. If `p` is
+load-dependent, the true gate failure rate is a mixture over load states and will
+differ from 30 %, possibly substantially. The estimate is useful for deciding
+that the gate is unreliable, and it is not a number to quote as the gate's
+failure rate.
+
+The further caveat is that the 60-run diagnostic executes at a different point in
+the job than the gating 5 runs, so these are estimates of `p`, not a direct
+measurement of the gate.
 
 Fixing *that* means changing how the gate aggregates independent real-time
 events — a product decision about what the gate should assert, not a bug fix.
@@ -216,20 +249,35 @@ The legitimate options, none of which were taken unilaterally:
 - **C** — invest in removing the contention itself (dedicated or larger runner),
   which is infrastructure, not code.
 
-Option **B** has a concrete basis: `ensureTracksPrepared` treats a `faulted`
-entry as non-reusable and disposes it, so the next Play opens a fresh session.
-That path is pinned by test 10.
+Option **B** rests on recovery being real, and recovery is **tested at the
+runtime level, not end-to-end**. Test 10 drives the shipped
+`NativeVst3EffectRuntime` with a real recorded worklet failure message and
+observes that the faulted entry is disposed and that the next Play opens a fresh,
+usable session. What it does not cover is `audioEngine.stop()` (which the app's
+`onFatal` calls), the real native helper (mocked), or the packaged application.
+So option B is *supported by a product-path test* and is **not** verified as a
+user-visible guarantee. See §11.
 
 ---
 
 ## 5. What this branch does contain
 
-`src/audio/nativeVst3DeadlineLatch.test.ts` — 10 tests against the real shipped
-worklet source in a sandbox, the same methodology as
-`nativeVst3PendingGuardBoundary.test.ts`. Control-port and live-port messages are
-delivered only between `process()` calls, as the audio thread requires; every
-step is a synchronous call in a known order, so there is no wall-clock race and
-no sleep, retry or relaxed timing anywhere.
+`src/audio/nativeVst3DeadlineLatch.test.ts` — 10 tests, in **two layers**, and the
+distinction matters for what each one can claim.
+
+**Tests 1–9 — the shipped worklet**, evaluated from `VST3_FX_WORKLET_SOURCE` in a
+sandbox, the same methodology as `nativeVst3PendingGuardBoundary.test.ts`.
+Control-port and live-port messages are delivered only between `process()` calls,
+as the audio thread requires; every step is a synchronous call in a known order,
+so there is no wall-clock race and no sleep, retry or relaxed timing anywhere.
+
+**Test 10 — the shipped runtime.** It drives the real `NativeVst3EffectRuntime`
+through `ensureTracksPrepared`, using the same narrow seams
+`nativeVst3EffectRuntime.test.ts` already uses (`getBridge` injection and the
+`AudioWorkletNode` global). The worklet's failure message is *captured from the
+shipped worklet* rather than hard-coded, so the disposal it triggers is the real
+one. The native helper is a bridge mock and `audioEngine.stop()` is not involved —
+see §11 for exactly what that leaves unverified.
 
 It fills the gap the failing run exposed: `nativeVst3PendingGuardBoundary.test.ts`
 pins **when** the guard fires, but nothing pinned **what the session looks like
@@ -247,45 +295,69 @@ somehow removed:
 4. the request stream stops at the latch, so nothing queues without bound
 5. a helper that never answers still fails closed
 6. a result arriving after the latch is refused, so no stale PCM is replayed
-7. an accepted block is never accepted twice
+7. a duplicate delivery is rejected **in a healthy session, with no latch** — the
+   accepted-block count does not increase and the duplicate's audio is never
+   rendered, so this proves duplicate handling rather than failure handling
 8. the coexistence warmup predicate can never be satisfied after a latch — the
    arm-probe timeout's actual mechanism
 9. a latched insert stops posting diagnostics: no message storm on the audio
    thread
-10. a fresh processor is healthy again, so the failure is recoverable by
-    re-preparation
+10. the real runtime disposes a faulted entry and the next Play, issued **before
+    that disposal finishes**, prepares a fresh, usable session — while refusing to
+    revive the faulted one
 
 ### 5.1 Verified load-bearing by mutation, not by inspection
+
+Every row below was re-run against the corrected tests on this branch.
 
 | mutation | outcome |
 |---|---|
 | remove **both** fail-closed output guards | **caught by test 9** — without them a latched insert posts one diagnostic per quantum, **376 in one second**, forever |
 | accept results after the latch (replay stale PCM) | **caught by test 6** |
-| revert `ead88bb` (guard fires one frame early) | **caught by 1, 2, 6, 10** |
-| remove **both** pending-guard paths | **caught by 1, 2, 5** |
-| remove **only** the outer guard path | **correctly invisible** — the inner per-sample path catches the same overdue block; documented in test 5 |
+| revert `ead88bb` (guard fires one frame early) | **caught by 1, 2, 6** |
+| remove **both** pending-guard paths | **caught by 1, 2, 5, 10** |
+| drop the `sequence === pending` term, so a duplicate is re-adopted | **caught by test 7** |
+| runtime ignores the worklet failure message (no disposal) | **caught by test 10** |
+| allow reuse of a latched entry (drop `disposed`, `stopping` **and** `faulted`) | **caught by test 10** |
+| drop **only** the `faulted` term | **survives** — see below |
+| remove **only** the outer pending-guard path | **correctly invisible** — the inner per-sample path catches the same overdue block; documented in test 5 |
 
-The first mutation is worth calling out: it survived until test 9 existed. It is
-easy to assume the second `failed` guard in `process()` is redundant, and it is
-not — `fail()` clears both queues, so without the guard every later quantum
-finds its block missing in the output loop, posts another `deadline-miss` event
-and breaks. `postMessage` from the audio thread is the one operation here that
-is not real-time safe.
+Two rows deserve calling out, because both are cases where a test looks like it
+proves more than it does.
+
+**The first mutation survived until test 9 existed.** It is easy to assume the
+second `failed` guard in `process()` is redundant, and it is not — `fail()` clears
+both queues, so without the guard every later quantum finds its block missing in
+the output loop, posts another `deadline-miss` event and breaks. `postMessage`
+from the audio thread is the one operation here that is not real-time safe.
+
+**Dropping only the `faulted` term survives, and that is expected.** Recovery is
+protected by defence in depth: `fail(entry, ...)` calls `disposeEntry`, which sets
+both `disposed` and `stopping` before the asynchronous disposal finishes, so those
+two terms already block reuse even with `faulted` removed. Test 10 therefore pins
+the **observable product behaviour** — a failed insert is disposed and the next
+Play, even one issued before that disposal completes, prepares a fresh usable
+session — and not any single intermediate term. It is also why the duplicate
+test 7 had to be rewritten: the old version's assertion could be satisfied by the
+latch rather than by duplicate handling, and a uniqueness check over a one-element
+list cannot fail.
 
 ---
 
 ## 6. Verification
 
-Run locally on this branch (`7f52f3e`), Linux, Node v22.22.3.
+Run locally, Linux, Node v22.22.3. Test counts are unchanged from before the
+test-quality corrections: test 7 and test 10 were replaced in place, so the file
+still contributes 10 tests.
 
 | command | exit | result |
 |---|---|---|
 | `npx tsx --test src/audio/nativeVst3DeadlineLatch.test.ts` | 0 | 10 / 10 |
-| `npm run test:audio` | 0 | **2592 / 2592**, 485 suites (was 2582) |
+| `npm run test:audio` | 0 | **2592 / 2592**, 485 suites (2582 before this file existed) |
 | `npm run test:history` | 0 | **1283 / 1283** |
-| `npm run test:all` | 0 | **4018 / 4018**, 613 suites (was 4008) |
+| `npm run test:all` | 0 | **4018 / 4018**, 613 suites (4008 before this file existed) |
 | `npm run lint` (`tsc --noEmit`) | 0 | clean |
-| `npm run build` | 0 | built in 7.19 s |
+| `npm run build` | 0 | built in 7.29 s |
 
 `npm run test:audio` runs `verify-test-discovery.mjs` first, so the new file is
 confirmed covered rather than orphaned. `package-lock.json` was restored with
@@ -539,9 +611,20 @@ process leaked on any run that reached shutdown.
 - Observed gate verdicts on unchanged production code: **2 pass / 1 fail**,
   consistent with the §4 model's `P(gate 5/5) ≈ 0.70`.
 
-This is the whole finding in one line: **the scenario is healthy and the
-instrument is noisy**, and 180 consecutive clean repetitions do not make the next
-single repetition predictable.
+The finding, stated without overreaching: **the packaged scenario can pass
+repeatedly on correct code, and the 5-repetition gate is a noisy instrument for
+it** — 180 consecutive clean diagnostic repetitions did not make the next single
+repetition predictable.
+
+What must not be read into that. "The scenario passes often" is not "the
+scenario is healthy". When a repetition misses its deadline the product does
+exactly what it is designed to do - it stops playback rather than replaying stale
+PCM - and that remains **a real reliability event for the user**, not a test
+artefact. This investigation did not show that such misses are harmless, only
+that they occur at a low rate on a contended shared runner and that the failure
+was being attributed to the wrong layer. §4 records that it is unresolved whether
+the same outlier can occur on ordinary user systems; if it can, this is a DAW
+reliability risk that this PR makes diagnosable and does not remove.
 
 ### Remaining, honestly
 
@@ -553,3 +636,50 @@ single repetition predictable.
   runner.
 - The gate's aggregation policy: **OPEN, and a product decision.** Options A, B
   and C in §4 are unchanged and none was taken unilaterally.
+
+---
+
+## 11. What test 10 does and does not prove
+
+Test 10 was rewritten from a second bare sandbox to the shipped runtime, so the
+scope of the recovery claim changed. This section is the precise boundary,
+because "recovery is tested" is easy to read as more than it is.
+
+**Tested, at the runtime level.** With the real `NativeVst3EffectRuntime` and a
+failure message captured from the shipped worklet:
+
+- the control-port handler routes `{type:'failure', reason}` into the runtime's
+  own `fail(entry, reason)` path;
+- the faulted entry is reported once through the diagnostic feed the UI reads,
+  and once through `onFatal` — the callback the application wires to
+  `audioEngine.stop()`;
+- `isPrepared()` becomes false and `nodeFor()` returns nothing, which is the
+  `prepared=false` the acceptance reports;
+- the entry is disposed: the worklet is sent `stop`, its port is closed, and the
+  helper session is closed;
+- the next `ensureTracksPrepared` — issued **before that asynchronous disposal
+  finishes**, which is the window a user's next Play lands in — opens a *fresh*
+  session and constructs a *new* worklet node, and the insert is usable again.
+
+**Not tested, and not claimed.**
+
+- **`audioEngine.stop()`.** `onFatal` is invoked and its arguments are asserted,
+  but the production callback body is `() => { this.stop(); }` in
+  `audioEngine.ts`, and test 10 substitutes a recorder. So "the transport
+  genuinely stops" remains a **source citation plus the failing run's own
+  evidence**, not a test in this file. It is well supported — the annotation
+  shows `processedBlocks` frozen and `prepared=false`, which is what a stopped
+  transport and a disposed insert produce together — but it is not unit-tested
+  here.
+- **The native helper.** `bridge` is a mock. No plugin is loaded, no IPC happens,
+  no real audio is processed. The ~28 ms latency outlier that causes the miss
+  cannot be reproduced by this test at all.
+- **The packaged application.** Nothing here runs Electron, the staged helper, or
+  the acceptance script.
+- **An ordinary user's machine.** Even a passing CI run says nothing about this;
+  see §4.
+
+So the accurate statement is: **recovery after a faulted insert is exercised
+against the shipped runtime with realistic mocks, and it is not verified
+end-to-end.** Option B in §4 remains a proposal that this test *supports*, not a
+guarantee it establishes.
