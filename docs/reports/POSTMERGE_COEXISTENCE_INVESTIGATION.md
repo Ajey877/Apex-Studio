@@ -756,13 +756,19 @@ clean demonstration.
 
 ## 13. Two adjacent runs on the same source: 4/60 then 9/60, and a gate that failed at 2/5
 
-The documentation-only commits that followed §12 re-ran the packaged job twice more.
+The documentation-only commits that followed §12 re-ran the packaged job three more times.
 The results, on source that is identical apart from this document:
 
 | run | job | gating lane | 60-rep diagnostic | max event-loop lag |
 |---|---|---|---|---|
 | `45997738133` | `140501287719` | **PASS 5/5** | **4/60**, `[1, 33, 39, 54]` | 72.39–78.06 ms |
 | `46006658995` | `140531403200` | **FAIL 2/5** | **9/60**, `[1, 10, 20, 51, 56, 59]` | 60.74–70.25 ms |
+| `46015836980` | `140562594035` | **PASS 5/5** | **5/60** | — |
+
+The third row is the head this report ships on. Three consecutive jobs on one
+build produced **4, 9 and 5 failures in 60**, with the gate going pass, fail,
+pass. That sequence is the clearest statement of the problem in this document:
+the gating lane's verdict tracked runner luck, not a change in the software.
 
 Both jobs ran the same build. The second failed the gate at **2 of 5** — three
 repetitions were lost to the warmup — and its diagnostic recorded **nine**
