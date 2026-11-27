@@ -218,7 +218,8 @@ contention:
 | `98b8e81`, 60 reps | 3 | 0.050 | 0.77 |
 | `75d696f`, 60 reps | 1 | 0.017 | 0.92 |
 | `68cdd20`, 37 reps | 1 | 0.027 | 0.87 |
-| **pooled** | **15 / 217** | **0.069** | **0.70** |
+| `71013f7`, 60 reps | 4 | 0.067 | 0.71 |
+| **pooled** | **19 / 277** | **0.069** | **0.70** |
 
 **Read the ≈30 % figure as an estimate under an assumed model, not a measured
 universal probability.** It follows only if two things hold: each repetition is
@@ -683,3 +684,68 @@ So the accurate statement is: **recovery after a faulted insert is exercised
 against the shipped runtime with realistic mocks, and it is not verified
 end-to-end.** Option B in §4 remains a proposal that this test *supports*, not a
 guarantee it establishes.
+
+---
+
+## 12. The strongest single sample: gate 5/5 while the diagnostic failed 4/60
+
+Desktop Validation run `45997738133` (job `140501287719`) on this PR's head
+`71013f7` completed **green**, and is worth recording at length because it is the
+cleanest measurement this investigation obtained.
+
+| lane | result |
+|---|---|
+| gating coexistence, 5 repetitions | **PASS 5/5**, `deadlineMisses=0` |
+| non-gating diagnostic, 60 repetitions | **FAIL 4/60** (`failingRepetitions = [1, 33, 39, 54]`) |
+| packaged live-input PCM | PASS |
+| packaged editor acceptance (step 23) | PASS |
+
+**Both lanes ran in the same job, minutes apart, on the same installed build.**
+The gate passed on a job whose diagnostic recorded four genuine missed deadlines.
+That is not a contradiction in the instrumentation; it is the instrument behaving
+exactly as the model predicts — a 5-repetition conjunction can pass while a
+60-repetition survey fails, and the probability of that is `(1-p)^5 ≈ 0.70` at
+`p = 0.067`.
+
+### The four failures, decomposed
+
+Every one was the same rejection shape, captured with the `accepted`-gated
+correlation, and no stale PCM was adopted in any of them:
+
+| run | missed seq | due frame | received frame | round trip | main event-loop lag |
+|---|---|---|---|---|---|
+| 1 | 2 | 4096 | 4224 | 23 ms | 77.34 |
+| 33 | 2 | 4096 | 4224 | 24 ms | 76.10 |
+| 39 | 2 | 4096 | 4224 | 23 ms | 78.06 |
+| 54 | **0** | 2048 | 2176 | **11 ms** | 72.39 |
+
+Three things follow directly.
+
+1. **The failures cluster in the helper's cold window** — sequence 2 in three of
+   four, sequence 0 in one — consistent with §4 and with the previously recorded
+   population. This sample does not reproduce the mid-session (57/149) signature.
+2. **`mainEventLoopLagMaxMs` is 72–78 ms on all four** — against 48.88–55.09 ms on
+   the passing run of the earlier tree. That is the strongest direct support the
+   investigation has for the contention hypothesis in §4, and it is still
+   *support*, not isolation: load was not held constant.
+3. **Run 54 is the sharpest case and deserves emphasis.** Its recorded round trip
+   was **11 ms against a 21.33 ms budget** — comfortably inside — and the guard
+   still fired, because the result arrived at frame 2176 when it was due at 2048:
+   **one render quantum late regardless of the trip time.** This is the same
+   `worstMarginMs` trap documented in §9, now in the opposite direction. It
+   confirms that the quantity the guard acts on is *frame alignment*, not elapsed
+   round-trip time, and that a short round trip can still miss if delivery lands
+   across a quantum boundary. It also confirms the corrected correlation is doing
+   its job: only `accepted` results contribute a margin.
+
+### Consequence for the estimate
+
+Pooling this sample moves the point estimate barely at all — `19/277 = 6.9 %`,
+exactly where it was — and it strengthens the case for reporting `p` as a
+**mixture over runner load states** rather than a single number. Four failures in
+one 60-run survey and zero in the two adjacent ones is the non-stationarity the
+§4 caveat describes, observed directly.
+
+It also settles the practical question the PR was opened with: **a green gate on
+this tree does not mean the underlying misses stopped**, and this run is the
+clean demonstration.
