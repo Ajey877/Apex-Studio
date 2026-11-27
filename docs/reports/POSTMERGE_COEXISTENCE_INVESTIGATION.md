@@ -764,10 +764,11 @@ The results, on source that is identical apart from this document:
 | `45997738133` | `140501287719` | **PASS 5/5** | **4/60**, `[1, 33, 39, 54]` | 72.39–78.06 ms |
 | `46006658995` | `140531403200` | **FAIL 2/5** | **9/60**, `[1, 10, 20, 51, 56, 59]` | 60.74–70.25 ms |
 | `46015836980` | `140562594035` | **PASS 5/5** | **5/60** | — |
+| `46025549899` | `140595888501` | **PASS 5/5** | **1/60** | — |
 
-The third row is the head this report ships on. Three consecutive jobs on one
-build produced **4, 9 and 5 failures in 60**, with the gate going pass, fail,
-pass. That sequence is the clearest statement of the problem in this document:
+The third row is the head this report ships on. Four consecutive jobs on one
+build produced **4, 9, 5 and 1 failures in 60**, with the gate going pass, fail,
+pass, pass. That sequence is the clearest statement of the problem in this document:
 the gating lane's verdict tracked runner luck, not a change in the software.
 
 Both jobs ran the same build. The second failed the gate at **2 of 5** — three
@@ -783,10 +784,16 @@ failure itself is not surprising.
 What it does show is the thing §4 warned about and could not previously
 demonstrate at this strength: **`p` is not stationary.** Back-to-back runs of one
 binary produced 4/60 and 9/60. The earlier four-in-60-then-0 pair said the same;
-this pair says it twice as loudly, in the opposite direction. A single `p`
-therefore understates the problem for a gate, because the gate's failure
-probability is `1 - (1 - p_thisrun)^5` evaluated on *that run's* `p`, and
-`p_thisrun` varied by more than 2× between adjacent jobs.
+this pair says it twice as loudly, in the opposite direction. The two further
+jobs — 5/60 and 1/60 — widen the spread to a **9× range** across four consecutive
+runs of one build. A single `p` therefore understates the problem for a gate,
+because the gate's failure probability is `1 - (1 - p_thisrun)^5` evaluated on
+*that run's* `p`, and `p_thisrun` ranged from 1.7 % to 15 % between adjacent jobs.
+
+The mean across these four is `19/240 = 7.9 %`, close to the pooled 7.1 %, which
+is the useful summary: the average is stable while the per-run value is not.
+Quoting the average as though it were the per-run rate is exactly the mistake
+that makes a 5-repetition gate look more reliable than it is.
 
 That is also the strongest support yet for the **contention** hypothesis in §4,
 and it is still support rather than isolation: the lag figures sit in one band
