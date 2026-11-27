@@ -342,3 +342,68 @@ confirmed covered rather than orphaned. `package-lock.json` was restored with
   exists to make the next failure diagnosable in one line instead of a
   three-hour investigation, and to record that the remaining problem is a
   measurement-design decision rather than a defect to be patched.
+
+---
+
+## 8. Postscript: the packaged Windows acceptance DID run, and it passed
+
+Written after PR #309's own Desktop Validation completed. This section supersedes
+§6's "packaged Windows acceptance was not run" for the *production* path — the
+test file added here is unmodified production code, so this is a genuine
+packaged-Windows run of the path the investigation concerns.
+
+**Run `45964493931`, job `140389814676` — conclusion `success`, 54 m 21 s.**
+
+| step | verdict | name |
+|---|---|---|
+| 17 | **PASS** | Packaged Windows live input PCM and recording acceptance (fake microphone) |
+| 19 | **PASS** | Packaged native VST3 + live input coexistence acceptance |
+| 21 | **PASS** | Cold-start deadline diagnostic (high volume, non-gating) |
+| **23** | **PASS** | Native VST3 editor acceptance through the packaged application |
+| 25 | PASS | Record the packaged acceptance verdict |
+| 26 | PASS | Upload measured production VST3 evidence |
+| 27 | PASS | Upload Windows package |
+
+Step 23 is the one that was **skipped** on the failing run `45953961366`. It ran
+and passed here, so the packaged editor acceptance is no longer NOT VERIFIED.
+
+**Both** coexistence lanes passed, from the annotations:
+
+```
+{"status":"PASS","passedRuns":5,"requestedRuns":5,  "deadlineMisses":0,"nativeFailures":0}
+{"status":"PASS","passedRuns":60,"requestedRuns":60,"deadlineMisses":0,"nativeFailures":0,
+ "helperProcessesLeakedAfterShutdown":[],"physicalHardware":"NOT_VERIFIED"}
+```
+
+with gating blocks before/during/after `23/79/77` and diagnostic
+`23/80/77`, and the diagnostic's per-repetition verdicts a clean 60-character
+run of `P`.
+
+### Read this result correctly
+
+**It is not a fix, and it is not evidence that the mechanism in §3 is wrong.**
+Zero failures in 60 puts the per-run miss rate's plausible upper bound around
+5 % (rule of three: 3/60), which is entirely consistent with the instrumented
+pooled estimate of 6.9 % and with the previously recorded "4 failures in 60 and
+then 0" on byte-identical code. The production code here is unchanged, so the
+contention that causes the miss was simply absent for 64 consecutive repetitions.
+
+The prediction that follows is falsifiable and stands: **a re-run of the same
+gate can fail again on this same tree** with the same `arm-probe` signature. That
+is what §4's probability model says, and it is why the measurement-design
+decision remains open rather than being closed by a green run. If a future run
+fails at `arm-probe`, §3's chain explains it in one line.
+
+### What changed in the PASS/FAIL/NOT VERIFIED split
+
+- **PASS** — packaged Windows coexistence 5/5 gating and 60/60 diagnostic, both
+  with `deadlineMisses=0`; packaged live-input PCM (fake microphone); packaged
+  editor acceptance (step 23); native DAW integration; editor session/recovery
+  contract; editor/audio helper separation with real PIDs; packaged runtime
+  smoke; Windows package built and uploaded.
+- **FAIL** — nothing in this run. Run `45953961366` step 19 remains the
+  historical failure, unfixed and intermittent by nature.
+- **NOT VERIFIED** — physical hardware (fake capture fixture, deterministic
+  insert buffer; no acoustic equivalence claimed); the four evidence-artifact
+  zips (still redirect to a blob host outside this environment's allowlist);
+  whether the contention can be removed, which needs a different runner.
