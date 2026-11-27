@@ -136,3 +136,53 @@ export const pitchFromNormalized = (value: number): number =>
 
 /** FX slot wet/dry: 0..1, clamped because slot.mix is a bounded model field. */
 export const fxMixFromNormalized = (value: number): number => Math.max(0, Math.min(1, value));
+
+/**
+ * Phase 12 — inverses of the conversions above.
+ *
+ * Automation *recording* has to read a control's current value and express it in
+ * the same normalized 0..1 space the lanes store, or a lane recorded from a
+ * fader would not play back at the fader's position. Each inverse is written
+ * directly against its forward conversion in this file (not re-derived at the
+ * call site), so the pair cannot drift: change a range here and both the
+ * playback and the recording side follow.
+ *
+ * Every inverse clamps its input to the forward function's own domain first
+ * (a hand-edited project can hold `volume = 7`), and a non-finite value yields
+ * the midpoint `0.5` — never `NaN`, which would poison a lane point.
+ */
+const safeUnit = (normalized: number): number => (Number.isFinite(normalized) ? Math.max(0, Math.min(1, normalized)) : 0.5);
+
+/** Inverse of `panFromNormalized`: -1..1 -> 0..1, centred at 0.5. */
+export const panToNormalized = (pan: number): number =>
+  Number.isFinite(pan) ? Math.max(0, Math.min(1, (pan + 1) / 2)) : 0.5;
+
+/** Inverse of `mixerVolumeFromNormalized`: 0..1.25 -> 0..1. */
+export const mixerVolumeToNormalized = (volume: number): number =>
+  Number.isFinite(volume) ? Math.max(0, Math.min(1, volume / MIXER_VOLUME_MAX)) : 0.5;
+
+/** Inverse of `filterCutoffFromNormalized`: 40..18040 Hz -> 0..1 (quadratic). */
+export const filterCutoffToNormalized = (cutoffHz: number): number => {
+  if (!Number.isFinite(cutoffHz)) return 0.5;
+  const clamped = Math.max(FILTER_CUTOFF_MIN_HZ, Math.min(FILTER_CUTOFF_MIN_HZ + FILTER_CUTOFF_SPAN_HZ, cutoffHz));
+  return Math.sqrt((clamped - FILTER_CUTOFF_MIN_HZ) / FILTER_CUTOFF_SPAN_HZ);
+};
+
+/** Inverse of `filterResonanceFromNormalized`: 0.0001..20 -> 0..1. */
+export const filterResonanceToNormalized = (resonance: number): number => {
+  if (!Number.isFinite(resonance)) return 0.5;
+  return Math.max(0, Math.min(1, resonance / FILTER_RESONANCE_MAX));
+};
+
+/** Inverse of `pitchFromNormalized`: -12..+12 semitones -> 0..1, 0.5 is untransposed. */
+export const pitchToNormalized = (semitones: number): number => {
+  if (!Number.isFinite(semitones)) return 0.5;
+  return Math.max(0, Math.min(1, (semitones + PITCH_RANGE_SEMITONES) / (PITCH_RANGE_SEMITONES * 2)));
+};
+
+/** Inverse of `masterOutputGainFromNormalized`: linear gain -> 0..1. */
+export const masterOutputGainToNormalized = (linearGain: number): number =>
+  Number.isFinite(linearGain) ? Math.max(0, Math.min(1, linearGain / MASTER_OUTPUT_GAIN_MAX)) : 0.5;
+
+/** Inverse of `channelVolumeFromNormalized` (identity, clamped) — kept named for symmetry. */
+export const channelVolumeToNormalized = (volume: number): number => safeUnit(volume);

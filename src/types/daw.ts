@@ -205,6 +205,32 @@ export interface AutomationPoint {
   lfoDepth?: number;
 }
 
+/**
+ * Phase 12 — automation recording mode, per automation target.
+ *
+ * The mode belongs to the *target* ("Mixer track 2 volume"), not to a clip: a
+ * lane clip can be split, deleted and re-created while the user expects the
+ * target to keep the mode they chose. `read` is the historical behaviour and is
+ * the default, so an old document without `ProjectState.automationModes` reads
+ * exactly as before.
+ *
+ * `off` stops *recording*; it does not mute playback. A lane in `off` still
+ * plays its points — the mode is a capture setting, not a bypass, and the UI
+ * says so.
+ */
+export type AutomationRecordingMode = 'off' | 'read' | 'write' | 'touch' | 'latch';
+
+export const AUTOMATION_RECORDING_MODES: readonly AutomationRecordingMode[] = [
+  'off',
+  'read',
+  'write',
+  'touch',
+  'latch',
+] as const;
+
+/** Persisted per-target mode map. Keys are `automationTargetKey(target)`. */
+export type AutomationModeSettings = Record<string, AutomationRecordingMode>;
+
 export type AutomationTargetType = 
   | 'vst3_param'
   | 'channel_vol' 
@@ -1050,4 +1076,12 @@ export interface ProjectState {
   macroKnobs?: MasterMacroKnob[];
   /** UI-only persistence marker for an acknowledged missing-audio warning. */
   dismissedMissingAudioSignature?: string;
+  /**
+   * Phase 12: per-target automation recording mode (`off`/`read`/`write`/
+   * `touch`/`latch`). Absent means every target is in `read`, which is the
+   * historical playback-only behaviour. See `automationTargetKey` in
+   * `src/audio/automationRecording.ts` for the key format, and
+   * `normalizeAutomationModes` for the load-time validation.
+   */
+  automationModes?: AutomationModeSettings;
 }

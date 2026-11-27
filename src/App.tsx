@@ -35,6 +35,20 @@ import { Vst3EditorWindowPanel } from './components/Vst3EditorWindowPanel';
 import { NativeVst3EditorSession, supportsNativeVst3Editor } from './audio/nativeVst3EditorSession';
 import { MidiCcMappingRuntime, MidiNoteInputRuntime, isRackChannelAudible } from './audio/midiMappingRuntime';
 import { MidiPerformanceRecorder, appendRecordedNotesToChannelInProjectState, type MidiRecordingClock } from './audio/midiRecording';
+import {
+  AutomationRecordingRuntime,
+  automationModeForTarget,
+  mixerTrackVolumeNormalized,
+} from './audio/automationRecordingRuntime';
+import {
+  automationTargetKey as automationTargetKeyOf,
+  isAutomationRecordingMode,
+  readAutomationTargetValue,
+  resolveAutomationMode,
+  setAutomationMode,
+} from './audio/automationRecording';
+import { channelVolumeToNormalized, panToNormalized } from './audio/parameterScaling';
+import { formatFxSlotTargetId } from './audio/fxParameterControl';
 import { finishMidiTake, type FinishMidiTakeOptions } from './audio/midiTakeBoundary';
 import { VirtualMidiInputBridge } from './audio/virtualMidiInput';
 import { 
@@ -763,6 +777,14 @@ export function App() {
       setIsPlaying(prev => prev === state.playing ? prev : state.playing);
       setCurrentStep(prev => prev === state.step ? prev : state.step);
       setCurrentBar(prev => prev === state.bar ? prev : state.bar);
+      // Phase 12: the transport's own callback is the recording clock. A lane in
+      // WRITE/TOUCH/LATCH arms when the playhead enters it, and WRITE/LATCH cover
+      // the interval they ran over even when the control itself did not move.
+      const recording = automationRecordingRef.current;
+      if (recording) {
+        recording.tick();
+        syncAutomationRecordingStatusRef.current();
+      }
     };
 
     audioEngine.setTransportStateCallback(handleTransportState);
@@ -776,6 +798,10 @@ export function App() {
   useEffect(() => {
     audioEngine.setSongEndCallback((position) => {
       finalizeMidiRecordingRef.current?.(position);
+      // Phase 12: a recording pass ends at the arrangement endpoint, exactly
+      // where the transport halted, not at a later stop.
+      automationRecordingRef.current?.finish('song end');
+      syncAutomationRecordingStatusRef.current();
     });
     return () => audioEngine.setSongEndCallback(null);
   }, []);
@@ -794,6 +820,10 @@ export function App() {
       // later does not reopen it — the Play branch below creates no boundary
       // and also revives no old take.
       finalizeMidiRecordingRef.current?.();
+      // Phase 12: close the automation pass at the pause position before the
+      // clock stops, so its last point is where the audio actually stopped.
+      automationRecordingRef.current?.finish('pause');
+      syncAutomationRecordingStatusRef.current();
       // Real pause: the transport keeps its position, scheduled audio is
       // cancelled, and Play resumes from the paused position.
       audioEngine.pause();
@@ -827,6 +857,8 @@ export function App() {
     // position through the shared boundary path, committing its notes and
     // releasing held live voices before the playhead resets.
     finalizeMidiRecordingRef.current?.();
+    automationRecordingRef.current?.finish('stop');
+    syncAutomationRecordingStatusRef.current();
     audioEngine.stop();
     setIsPlaying(false);
     setCurrentStep(0);
@@ -839,6 +871,8 @@ export function App() {
     // transport position (original channel/pattern target intact) before the
     // switch stops and restarts playback in the new mode.
     finalizeMidiRecordingRef.current?.();
+    automationRecordingRef.current?.cancel();
+    syncAutomationRecordingStatusRef.current();
     const nextMode: PlayMode = playMode === 'pat' ? 'song' : 'pat';
     setPlayMode(nextMode);
     if (isPlaying) {
@@ -1027,6 +1061,59 @@ export function App() {
     );
   }, [restoreRuntimeState, synchronizeRuntimeState]);
 
+  /**
+   * Phase 12: a pass can be invalidated by an unrelated edit (the user deletes the
+   * FX insert or the channel a lane addresses while it is recording). The reconcile
+   * hook is assigned once the recorder exists, and every published document is
+   * checked against it, so a pass never outlives its target.
+   */
+  const reconcileAutomationRecordingRef = useRef<(() => void) | null>(null);
+
+  /**
+   * Phase 12 — automation recording. `automationRecordingRef` owns the capture
+   * state machine (one armed target, transport-stamped samples, boundary rules);
+   * `automationRecordingStatus` only mirrors it for the status surfaces. The
+   * runtime talks to the document through `mutateProjectState`, so a finished
+   * pass is ONE history entry, never one per control movement.
+   */
+  const automationRecordingRef = useRef<AutomationRecordingRuntime | null>(null);
+  if (automationRecordingRef.current === null) {
+    automationRecordingRef.current = new AutomationRecordingRuntime({
+      getProjectState: () => projectStateRef.current,
+      getTransportPosition: () => audioEngine.getTransportMusicalPosition(),
+      commitPass: (label, apply) => {
+        // A pass is an edit, never a continuous drag: it commits its own single
+        // history entry.
+        mutateProjectStateRef.current(apply, label);
+      },
+    });
+  }
+  const [automationRecordingStatus, setAutomationRecordingStatus] = useState(
+    () => automationRecordingRef.current?.getStatus() ?? null,
+  );
+  /** Mirrors the recorder's state to the badge without re-rendering needlessly. */
+  const syncAutomationRecordingStatus = useCallback(() => {
+    const next = automationRecordingRef.current?.getStatus() ?? null;
+    setAutomationRecordingStatus(previous => {
+      if (previous === next) return previous;
+      if (previous && next && previous.active === next.active && previous.holding === next.holding &&
+          previous.mode === next.mode && previous.targetKey === next.targetKey &&
+          previous.clipId === next.clipId && previous.capturedPoints === next.capturedPoints) {
+        return previous;
+      }
+      return next;
+    });
+  }, []);
+  const syncAutomationRecordingStatusRef = useRef(syncAutomationRecordingStatus);
+  syncAutomationRecordingStatusRef.current = syncAutomationRecordingStatus;
+  useEffect(() => {
+    reconcileAutomationRecordingRef.current = () => {
+      automationRecordingRef.current?.reconcileWithProject();
+      syncAutomationRecordingStatusRef.current();
+    };
+    return () => { reconcileAutomationRecordingRef.current = null; };
+  }, []);
+
   const mutateProjectState = useCallback((
     updater: (current: ProjectState) => ProjectState,
     label: string,
@@ -1048,6 +1135,7 @@ export function App() {
           continuousBatcherRef.current.flush();
           commitProjectHistory(publishedState, label);
         }
+        reconcileAutomationRecordingRef.current?.();
         return publishedState;
       },
       restoreRuntimeState,
@@ -1261,11 +1349,47 @@ export function App() {
 
   const handleContinuousInteractionStart = useCallback((label?: string) => {
     continuousBatcherRef.current.start(label);
+    // Phase 12: a grab is the start of a TOUCH/LATCH performance. The runtime
+    // falls back to the armed lane, so this stays target-agnostic here and the
+    // specific control's value still arrives through its own funnel.
+    const recording = automationRecordingRef.current;
+    if (recording?.beginGesture()) {
+      syncAutomationRecordingStatusRef.current();
+    }
   }, []);
 
   const handleContinuousInteractionEnd = useCallback((label?: string) => {
     continuousBatcherRef.current.flush(label);
+    // Release closes a TOUCH pass (LATCH keeps holding until recording stops).
+    const recording = automationRecordingRef.current;
+    if (recording?.endGesture()) {
+      syncAutomationRecordingStatusRef.current();
+    }
   }, []);
+
+  /**
+   * Phase 12 — changing a lane's recording mode is a normal project edit, so it
+   * goes through `mutateProjectState` (one undo entry, autosaved, persisted).
+   * READ is the default and is stored as the absence of an entry, which keeps
+   * pre-Phase-12 documents byte-identical.
+   */
+  const handleUpdateAutomationMode = useCallback((
+    target: import('./types/daw').PlaylistClip['automationTarget'],
+    mode: import('./types/daw').AutomationRecordingMode,
+  ) => {
+    if (!target) return;
+    mutateProjectState(
+      current => ({ ...current, automationModes: setAutomationMode(current.automationModes, target, mode) }),
+      `${isAutomationRecordingMode(mode) && mode !== 'read' ? 'Arm' : 'Set'} automation ${mode.toUpperCase()} (${target.label ?? target.type})`,
+    );
+    // Arming a lane while the transport is already inside it starts the pass now
+    // rather than at the next tick; disarming cancels a running pass immediately.
+    automationRecordingRef.current?.reconcileWithProject();
+    if (isAutomationRecordingMode(mode) && mode !== 'read') {
+      automationRecordingRef.current?.tick();
+    }
+    syncAutomationRecordingStatus();
+  }, [mutateProjectState, syncAutomationRecordingStatus]);
 
   const handleUndo = useCallback(() => {
     if (playlistInteractionActiveRef.current) return;
@@ -1762,6 +1886,18 @@ export function App() {
       getChannelUpdateLabel(updates),
       { isContinuous }
     );
+
+    // Phase 12: channel rack volume/pan feed `channel_vol` / `channel_pan` lanes
+    // through this same funnel.
+    const recording = automationRecordingRef.current;
+    if (recording) {
+      if (typeof updates.volume === 'number') {
+        recording.reportValue({ type: 'channel_vol', targetId: channelId }, channelVolumeToNormalized(updates.volume));
+      }
+      if (typeof updates.pan === 'number') {
+        recording.reportValue({ type: 'channel_pan', targetId: channelId }, panToNormalized(updates.pan));
+      }
+    }
   };
 
   const handleEditVst3Parameters: import('./audio/nativeVst3Types').Vst3ParameterEditorCommit = async (channel, changes, signal) => {
@@ -1772,6 +1908,39 @@ export function App() {
     await audioEngine.editVst3Parameters(channel, changes, isCurrent, instrument => {
       if (!isCurrent()) throw new Error('VST3 parameter edit cancelled');
       mutateProjectState(current => updateChannelInProjectState(current, channel.id, { vst3: instrument }), 'Edit VST3 parameters');
+
+      // Phase 12: a committed VST3 edit is the capture point for `vst3_param`
+      // lanes. The editor is draft-then-Apply, so the lane records committed
+      // values only — never the intermediate knob positions of a draft.
+      const recording = automationRecordingRef.current;
+      if (recording) {
+        /*
+         * Address the lane by the committed plug-in identity, then read the value
+         * back from the document: `readAutomationTargetValue` returns null for a
+         * parameter that is not in the stored state, so an edit that did not
+         * actually land can never write a lane point. Only lanes whose target key
+         * matches exactly are written, which means a lane that was authored from
+         * an automatable parameter — the only kind that can exist.
+         */
+        const committed = projectStateRef.current.channels.find(candidate => candidate.id === channel.id)?.vst3;
+        const current = projectStateRef.current;
+        for (const change of changes) {
+          if (!committed) continue;
+          const target = {
+            type: 'vst3_param' as const,
+            targetId: channel.id,
+            native: {
+              path: committed.path,
+              classId: committed.classId,
+              automationId: committed.automationId ?? null,
+              parameterId: change.id,
+            },
+          };
+          const normalized = readAutomationTargetValue(target, current.channels, current.mixerTracks);
+          if (normalized === null) continue;
+          recording.reportValue(target, normalized);
+        }
+      }
     });
   };
 
@@ -2195,6 +2364,19 @@ export function App() {
       getMixerUpdateLabel(updates),
       { isContinuous }
     );
+
+    // Phase 12: the mixer fader/pan is the capture funnel for `mixer_vol` and
+    // `mixer_pan` lanes. The value is normalized through the same scaling the
+    // lane evaluator uses, so what is recorded is what playback will apply.
+    const recording = automationRecordingRef.current;
+    if (recording) {
+      if (typeof updates.volume === 'number') {
+        recording.reportValue({ type: 'mixer_vol', targetId: trackId }, mixerTrackVolumeNormalized({ volume: updates.volume }));
+      }
+      if (typeof updates.pan === 'number') {
+        recording.reportValue({ type: 'mixer_pan', targetId: trackId }, panToNormalized(updates.pan));
+      }
+    }
 
     const target = projectStateRef.current.mixerTracks.find(t => t.id === trackId);
     if (target && !audioEngine.isPlaybackActive()) {
@@ -3062,6 +3244,29 @@ export function App() {
       getFxUpdateLabel(updates),
       { isContinuous }
     );
+
+    // Phase 12: FX controls reach automation through this one funnel — the same
+    // `resolveFxParameterUpdate` contract the lane evaluator resolves against, so
+    // an unaddressable parameter is never recorded as a lane point.
+    const recording = automationRecordingRef.current;
+    if (recording) {
+      const targetId = formatFxSlotTargetId(trackId, slotId);
+      if (typeof updates.mix === 'number') {
+        recording.reportValue({ type: 'fx_mix', targetId }, Math.max(0, Math.min(1, updates.mix)));
+      }
+      if (updates.params) {
+        const current = projectStateRef.current;
+        for (const paramName of Object.keys(updates.params)) {
+          const target = { type: 'fx_param' as const, targetId, paramName };
+          // Read back from the mutated document: the lane must hold the value
+          // the engine will resolve, not the raw control value, so a parameter
+          // outside its contract is rejected here instead of being recorded.
+          const normalized = readAutomationTargetValue(target, current.channels, current.mixerTracks);
+          if (normalized === null) continue;
+          recording.reportValue(target, normalized);
+        }
+      }
+    }
   };
 
   /**
@@ -3821,6 +4026,12 @@ export function App() {
               onRedo={handleRedo}
               onSelectedClipIdChange={setSelectedPlaylistClipId}
               onOpenAudioEditor={id => { if (audioEngine.isOfflineRenderLeaseHeld()) return; audioEngine.pause(); setAudioEditorClipId(id); }}
+              automationModeForTarget={target => resolveAutomationMode(projectState.automationModes, target)}
+              onUpdateAutomationMode={handleUpdateAutomationMode}
+              automationRecordingStatus={automationRecordingStatus}
+              automationRecordingLabel={automationRecordingStatus?.targetKey
+                ? automationTargetLabel(projectState.playlistClips, automationRecordingStatus.targetKey)
+                : null}
               onSeekToBar={(bar) => {
                 // A take never spans a position jump: finalize at the old
                 // position before the playhead moves, so held gates end here
@@ -3828,6 +4039,10 @@ export function App() {
                 // (Scrubbing fires this per bar; only the first call finds a
                 // take to finalize.)
                 finalizeMidiRecordingRef.current?.();
+                // Phase 12: a pass never spans a position jump. Close it at the
+                // pre-seek position; playback arms a fresh pass at the new one.
+                automationRecordingRef.current?.finish('seek');
+                syncAutomationRecordingStatusRef.current();
                 // Real transport seek: works stopped, paused and playing. While
                 // playing it cancels audio scheduled for the old position and
                 // restarts any playlist audio clip the new position lands in.
@@ -4222,6 +4437,20 @@ export function App() {
       <OrientationLockModal />
     </div>
   );
+}
+
+/**
+ * Phase 12 — human label for the lane a pass is recording. The badge names the
+ * target the user recognises (the lane's own label), falling back to the target
+ * address so a hand-edited document still shows something meaningful.
+ */
+function automationTargetLabel(clips: readonly import('./types/daw').PlaylistClip[], targetKey: string): string | null {
+  const clip = clips.find(candidate =>
+    candidate.type === 'automation' && candidate.automationTarget &&
+    automationTargetKeyOf(candidate.automationTarget) === targetKey);
+  const target = clip?.automationTarget;
+  if (!target) return null;
+  return target.label ?? clip?.name ?? targetKey;
 }
 
 export default App;

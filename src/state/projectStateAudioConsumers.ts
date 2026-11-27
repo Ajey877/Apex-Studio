@@ -111,6 +111,9 @@ export const PROJECT_STATE_AUDIO_FIELDS: AudioFieldRegistry = {
   'grossBeatState':        { classification: 'consumed', consumer: 'audioEngine master gate (grossBeatGate.resolveGrossBeatGateGain)', note: 'Phase 79 master-bus amplitude gate; applied live AND in offline export.' },
   'macroKnobs':            { classification: 'consumed', consumer: 'macroMappings.ts:resolveMacroRack', note: 'Phase 51 macro-rack resolution drives mapped params at mutation time.' },
   'dismissedMissingAudioSignature': { classification: 'metadata', note: 'UI-only ack flag.' },
+  'automationModes':       { classification: 'consumed', consumer: 'audio/automationRecording.ts resolveAutomationMode (App capture path)', note: 'Phase 12: per-target automation recording mode (off/read/write/touch/latch). Read by the recording capture path only; playback of the lane is unchanged, so `off` does not mute an existing lane.' },
+  'playlistClips[].automationPoints': { classification: 'consumed', consumer: 'audioEngine.ts interpolateAutomationCurve / applyAutomationValue (live + renderTimelineOffline)', note: 'Automation lane payload. Phase 12 records into this same array; there is no second curve store.' },
+  'playlistClips[].automationTarget': { classification: 'consumed', consumer: 'audioEngine.ts applyAutomationValue / fxParameterControl.resolveFxParameterUpdate', note: 'Automation lane addressing; also keys the Phase 12 per-target recording mode through automationTargetKey().' },
 
   // ---- Channel fields (selected audio-relevant ones; see .channels[] consumer) ----
   // We don't enumerate every leaf of Channel here; the registry instead

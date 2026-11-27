@@ -10,6 +10,7 @@ import { normalizeChannelFreeze } from './trackFreeze';
 import { normalizeWavetableParameters } from '../audio/wavetableTables';
 import { normalizeSidechainSettings } from '../audio/sidechainCompression';
 import { normalizeChannelMidiOutputRouting } from '../audio/midiOutputScheduler';
+import { normalizeAutomationModes } from '../audio/automationRecording';
 
 /**
  * Phase 79: default Gross Beat gate state used when the persisted project has
@@ -604,6 +605,10 @@ export const normalizeProjectState = (input: unknown): ProjectState => {
       ? { ...clone(candidate.grossBeatState) as GrossBeatState, mix: clamp01((candidate.grossBeatState as GrossBeatState).mix) }
       : { ...DEFAULT_GROSS_BEAT_STATE, gateSteps: [...DEFAULT_GROSS_BEAT_STATE.gateSteps] },
     masteringSuiteState: normalizeMasteringSuiteState(candidate.masteringSuiteState),
+    // Phase 12: per-target automation recording mode. `read` is the default and
+    // is never stored, so an old document normalizes to exactly the same shape
+    // and an unknown/hand-edited mode is discarded rather than trusted.
+    automationModes: normalizeAutomationModes(candidate.automationModes),
     vocalTuner: candidate.vocalTuner === undefined ? undefined : clone(candidate.vocalTuner) as ProjectState['vocalTuner'],
     selectedPatternId: typeof candidate.selectedPatternId === 'string'
       ? candidate.selectedPatternId

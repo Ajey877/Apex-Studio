@@ -28,6 +28,8 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { PlaylistTrack, PlaylistClip, Pattern, Channel, AutomationTargetType, ArrangementMarker, MixerTrack } from '../types/daw';
+import type { AutomationRecordingMode } from '../types/daw';
+import { AUTOMATION_RECORDING_MODES } from '../types/daw';
 import { audioEngine, resolvePlaylistClipLoopLengthSteps } from '../audio/audioEngine';
 import { orderClipsForTakeRendering } from '../audio/takeLaneManager';
 import { findLaneBouncePatternClip, resolvePlaylistBounceTarget } from './playlistBounceTarget';
@@ -114,6 +116,22 @@ interface PlaylistArrangerProps {
    */
   onSelectedClipIdChange?: (clipId: string | null) => void;
   onOpenAudioEditor?: (clipId: string) => void;
+  /**
+   * Phase 12 — automation recording mode for a lane. Absent means the feature is
+   * not wired in this surface, and the selector is not rendered.
+   */
+  automationModeForTarget?: (target: PlaylistClip['automationTarget']) => AutomationRecordingMode;
+  onUpdateAutomationMode?: (target: PlaylistClip['automationTarget'], mode: AutomationRecordingMode) => void;
+  /** The recorder's live state, for the recording badge. */
+  automationRecordingStatus?: {
+    active: boolean;
+    holding: boolean;
+    mode: AutomationRecordingMode;
+    targetKey: string | null;
+    capturedPoints: number;
+  } | null;
+  /** Key of the lane the active pass is recording, so the badge can name it. */
+  automationRecordingLabel?: string | null;
   currentBar: number;
   isPlaying: boolean;
   /** Project tempo (`meta.bpm`); Bounce-In-Place renders stems at this tempo and imported audio is sized to it. */
@@ -232,6 +250,30 @@ const AUDIO_CLIP_SIGNAL_COLOR = '#00ff88';
 /** Pattern clip preview: one cell per step of the first bar of the clip's content. */
 const CLIP_PREVIEW_CELLS = 16;
 
+/**
+ * Phase 12 — how each recording mode is presented and what it does. The wording is
+ * the contract: a user picking LATCH must be able to tell from the UI that the
+ * value keeps writing after release until recording stops.
+ */
+const AUTOMATION_MODE_LABELS: Record<AutomationRecordingMode, string> = {
+  off: 'OFF',
+  read: 'READ',
+  write: 'WRITE',
+  touch: 'TOUCH',
+  latch: 'LATCH',
+};
+
+const AUTOMATION_MODE_DESCRIPTIONS: Record<AutomationRecordingMode, string> = {
+  off: 'OFF — playback of this lane is disabled and nothing is recorded',
+  read: 'READ — plays the lane as drawn; nothing is recorded',
+  write: 'WRITE — records continuously from Play until you stop or leave the lane',
+  touch: 'TOUCH — records while you hold a control, then returns to the existing curve',
+  latch: 'LATCH — records while you hold a control, then keeps the last value until recording stops',
+};
+
+export const automationModeDescription = (mode: AutomationRecordingMode): string =>
+  AUTOMATION_MODE_DESCRIPTIONS[mode] ?? AUTOMATION_MODE_DESCRIPTIONS.read;
+
 export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   tracks,
   clips,
@@ -254,6 +296,10 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
   onSeekToBar,
   onSelectedClipIdChange,
   onOpenAudioEditor,
+  automationModeForTarget,
+  onUpdateAutomationMode,
+  automationRecordingStatus = null,
+  automationRecordingLabel = null,
   currentBar,
   isPlaying,
   totalBars,
@@ -1854,6 +1900,25 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-bold text-[var(--apex-text)]">AUTOMATION ENVELOPE: {activeAutomationClip.name}</span>
+                {/*
+                  Phase 12 — live recording badge. It is only rendered while a pass
+                  is actually running, so it cannot be confused with the clip's
+                  configured mode (which is visible in the Mode selector and
+                  stays set after the pass ends).
+                */}
+                {automationRecordingStatus?.active && (
+                  <span
+                    data-testid="automation-recording-badge"
+                    title={`Recording ${automationRecordingLabel ?? automationRecordingStatus.targetKey ?? 'automation'} in ${automationRecordingStatus.mode.toUpperCase()} mode`}
+                    className="px-1.5 py-0.5 rounded bg-[var(--apex-state-recording)] text-[var(--apex-state-playing-fg)] font-mono text-[10px] flex items-center gap-1"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--apex-state-playing-fg)] animate-pulse" />
+                    {automationRecordingStatus.mode.toUpperCase()}
+                    {automationRecordingStatus.holding ? ' (held)' : ''}
+                    {' · '}
+                    {automationRecordingStatus.capturedPoints} pts
+                  </span>
+                )}
                 {selectedPointIndex !== null && activeAutomationClip.automationPoints?.[selectedPointIndex] && (
                   <span className="px-1.5 py-0.5 rounded bg-[color-mix(in_srgb,var(--apex-cyan)_20%,transparent)] text-[var(--apex-cyan-text)] font-mono text-[10px]">
                     Point #{selectedPointIndex + 1} (X: {activeAutomationClip.automationPoints[selectedPointIndex].x.toFixed(2)}, Y: {activeAutomationClip.automationPoints[selectedPointIndex].y.toFixed(2)})
@@ -1867,6 +1932,34 @@ export const PlaylistArranger: React.FC<PlaylistArrangerProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
+            {/*
+              Phase 12 — recording mode. Modes are per TARGET, not per clip: two
+              lanes pointed at the same parameter record together, which is the
+              only behaviour that cannot produce two conflicting passes.
+            */}
+            {onUpdateAutomationMode && automationModeForTarget && (
+              <>
+                <span className="text-[var(--apex-text-muted)]">Mode:</span>
+                <select
+                  aria-label="Automation recording mode"
+                  value={automationModeForTarget(activeAutomationClip.automationTarget)}
+                  onChange={(e) => onUpdateAutomationMode(
+                    activeAutomationClip.automationTarget,
+                    e.target.value as AutomationRecordingMode,
+                  )}
+                  title={automationModeDescription(automationModeForTarget(activeAutomationClip.automationTarget))}
+                  className={`bg-[var(--apex-canvas)] border rounded px-2 py-1 text-[11px] outline-none ${
+                    automationModeForTarget(activeAutomationClip.automationTarget) === 'read'
+                      ? 'border-[var(--apex-border)] text-[var(--apex-text-2)]'
+                      : 'border-[var(--apex-cyan)] text-[var(--apex-cyan-text)]'
+                  }`}
+                >
+                  {AUTOMATION_RECORDING_MODES.map(mode => (
+                    <option key={mode} value={mode}>{AUTOMATION_MODE_LABELS[mode]}</option>
+                  ))}
+                </select>
+              </>
+            )}
             <span className="text-[var(--apex-text-muted)]">Target:</span>
             <select
               aria-label="Automation target type"
