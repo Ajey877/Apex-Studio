@@ -407,3 +407,106 @@ fails at `arm-probe`, §3's chain explains it in one line.
   insert buffer; no acoustic equivalence claimed); the four evidence-artifact
   zips (still redirect to a blob host outside this environment's allowlist);
   whether the contention can be removed, which needs a different runner.
+
+---
+
+## 9. Postscript 2: the same build failed 1 h 20 m after it passed 60/60 — the natural experiment
+
+This section is the strongest evidence in this document, and it arrived by
+accident: pushing the §8 documentation commit re-ran Desktop Validation on the
+same source, and **it failed again with the identical signature.**
+
+Run `45971762495`, job `140413641840`: **conclusion `failure`**.
+
+| step | verdict | name |
+|---|---|---|
+| 17 | PASS | Packaged Windows live input PCM and recording acceptance (fake microphone) |
+| **19** | **FAIL** | Packaged native VST3 + live input coexistence acceptance |
+| **21** | **PASS** | Cold-start deadline diagnostic (high volume, non-gating) — **60/60** |
+| 23 | SKIP | Native VST3 editor acceptance through the packaged application |
+| 25 | FAIL | Record the packaged acceptance verdict (consequential) |
+
+### The trees are identical where it matters
+
+```
+git diff --stat 1364d88 de1c928
+  .../reports/POSTMERGE_COEXISTENCE_INVESTIGATION.md | 65 ++++++++++++++
+```
+
+The **only** difference is this document. `src/`, `native/`, `scripts/` and
+`.github/` are byte-identical, and the shipped worklet source hash is the same
+object at all three points:
+
+```
+1364d88:src/audio/nativeVst3EffectRuntime.ts -> 5cf8a20492510b83f8dfe83a81c08bab1b514485
+de1c928:src/audio/nativeVst3EffectRuntime.ts -> 5cf8a20492510b83f8dfe83a81c08bab1b514485
+98b8e81:src/audio/nativeVst3EffectRuntime.ts -> 5cf8a20492510b83f8dfe83a81c08bab1b514485
+```
+
+### What the same build did, in order, within 80 minutes
+
+| time (UTC) | run | gating 5-rep coexistence | 60-rep diagnostic |
+|---|---|---|---|
+| 08:17–09:11 | `45964493931` | **PASS 5/5** | **PASS 60/60** |
+| 09:33– | `45971762495` | **FAIL**, first repetition, 1.6 min | **PASS 60/60** |
+
+The gate failed on its **first** repetition — so it completed no successful
+repetition at all (`[acceptance] Cold-start aggregate: reps=1,
+perRepetitionVerdicts="F"`) — while in the same job, minutes later, the 60-rep
+diagnostic recorded a clean 60-character run of `P` with `deadlineMisses=0`.
+
+### The failure was captured with the corrected correlation, and it confirms §3 exactly
+
+This is the first run in this investigation where the failing block's own
+decomposition survived. From `[acceptance] Cold-start detail run 1 (FAIL)`:
+
+```
+status              FAIL     capturedAt  failure
+worstTotalRoundTripMs  7     worstMarginMs  14.33     blockBudgetMs  21.33
+missedSequences     [2]      mainRecordedSequences  [0, 1, 2]
+resultsAccepted     2        resultsRejected        1
+deadlineMissEvents  [{"guard":"pending-deadline-miss","sequence":2,"phase":"cold",
+                      "currentOutputFrame":4096,...}]
+rejections          [{"seq":2,"reason":"after-failure","pending":2,
+                      "recvFrame":4224,"dueFrame":4096,"rtt":28}]
+```
+
+Three things to read carefully.
+
+1. **The miss is sequence 2 at output frame 4096** — `2048 + 2*1024` — which is
+   the arithmetic §3 link 1 predicts, and the same sequence the failing
+   production run named.
+2. **The late round trip is `rtt=28` ms against a 21.33 ms budget**, delivered at
+   frame 4224 against a due frame of 4096 — i.e. **128 frames, one full render
+   quantum, late**. It was correctly rejected as `after-failure`, so no stale PCM
+   was replayed. That is test 6's requirement, observed in production.
+3. **`worstMarginMs=14.33` is a trap, and it is not a contradiction.** The
+   `warmupSnapshotRetained` was captured at the warmup stage and covers only the
+   blocks recorded *then*. The 28 ms round trip that actually missed was captured
+   later, on the failure path. The extractor correlates a round trip to a missed
+   block only when the result was **accepted** (`2f94494`), and this one
+   was rejected, so the miss's own round trip does not appear in the warmup
+   block's totals. Reading `worstMarginMs=14.33` as "nothing was late" would
+   repeat the positive-margin artefact the project already documented and
+   corrected; the `deadlineMissEvents` and `rejections` entries are the
+   authoritative record.
+
+### The decisive statistic
+
+The **same binary** passed 60 consecutive cold repetitions and then failed its
+first one. A 60/60 diagnostic pass therefore carries no information about
+whether the next run will fail — which is precisely why §4 refused to treat the
+green run as a fix, and why the gate's 5-repetition conjunction is the wrong
+instrument for a per-run event at `p ≈ 5 %`.
+
+Combining every observation in this document (~283 gating repetitions' worth of
+diagnostic sampling): **4/60, 0/60, 0/60 fail rates for the identical scenario
+within one working session.** The spread is the finding.
+
+### Consequence for this PR
+
+Nothing in this PR changes that, and this PR is not a fix. What it now has is a
+**reproduction on the real packaged path**, with the failing block's own
+numbers, that matches the seven-link chain in §3 link for link — and a test suite
+that fails if any of those links changes. The measurement-design decision in §4
+is now the only open question, and it is a product decision, not a bug.
