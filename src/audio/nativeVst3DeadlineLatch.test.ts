@@ -443,7 +443,7 @@ test('9. a latched insert stops posting diagnostics: no message storm on the aud
 
 // --- 10. recovery is explicit re-preparation, not in-session resurrection --------
 
-test('10. the real runtime disposes a faulted entry and the next Play prepares a usable one', async () => {
+test('10. the real runtime disposes a faulted entry, the next Play prepares a fresh one, and that fresh entry processes a block', async () => {
   /**
    * This is the product-level recovery test, and it runs the SHIPPED runtime rather
    * than a second sandbox. Nothing is changed in production code to make it
@@ -570,8 +570,19 @@ test('10. the real runtime disposes a faulted entry and the next Play prepares a
     assert.equal(fatal[0].message, shippedFailure, 'the production message reached onFatal');
     assert.equal(fatal[0].trackId, recoveryTrack.id);
     assert.equal(fatal[0].slotId, recoverySlot.id);
-    assert.equal(getVst3MixerEffectDiagnostics().some(item => item.trackId === recoveryTrack.id && item.slotId === recoverySlot.id
-      && item.message === shippedFailure), true,
+    // The diagnostic feed REPLACES any existing entry for this (trackId, slotId)
+    // rather than appending - see `reportVst3MixerEffect`, which filters the old
+    // entry out before inserting. So an exact count here measures "at most one per
+    // slot", not "reported exactly once": a double report would overwrite instead of
+    // accumulating and the count would still be 1. The exact-once property is
+    // therefore asserted where it is actually observable, on the onFatal callback
+    // above (`fatal.length`). This assertion pins what the feed itself guarantees:
+    // exactly one entry for this slot, carrying the production message.
+    const slotDiagnostics = getVst3MixerEffectDiagnostics()
+      .filter(item => item.trackId === recoveryTrack.id && item.slotId === recoverySlot.id);
+    assert.equal(slotDiagnostics.length, 1,
+      'the feed holds exactly one entry for this slot: it replaces rather than accumulates');
+    assert.equal(slotDiagnostics[0].message, shippedFailure,
       'the same message is exposed to the UI as a native Mixer diagnostic');
 
     // 4. The entry is faulted, so monitoring refuses rather than reviving a dead insert.
@@ -594,21 +605,64 @@ test('10. the real runtime disposes a faulted entry and the next Play prepares a
     assert.equal(nodes.length, 2, 'a new worklet node was constructed');
     assert.notEqual(nodes[1], firstNode, 'the new insert is a different node, not the latched one');
     assert.equal(runtime.isPrepared(recoveryTrack.id, recoverySlot.id, context, recoveryEffect), true,
-      'the re-prepared insert is usable again - this is what recovery means here');
+      'the re-prepared insert is reported as prepared');
     assert.equal(closed.includes('session-1'), true, 'the faulted session was closed in the helper');
     assert.equal(firstNode.port.closed, true, 'the faulted worklet port was closed');
     assert.equal(runtime.nodeFor(recoveryTrack.id, recoverySlot.id, context, recoveryEffect), nodes[1],
       'lookups return the fresh node');
     assert.equal(fatal.length, 1, 'no second failure was reported for the fresh session');
 
-    // 6. And the fresh session is genuinely healthy: it accepts results again.
+    // 6. The fresh entry actually PROCESSES A BLOCK. This is the difference between
+    //    "a new entry exists" and "recovery works", so it is exercised through the
+    //    real request/response path the runtime uses in production:
+    //      worklet posts {type:'process', sequence, samples}
+    //        -> runtime awaits bridge.processAudio(session-2, ...)
+    //        -> runtime posts {type:'result', sequence, samples} back on node.port
+    //    The failure path from step 2 was one-way (the worklet's `failure` message
+    //    needs no round trip); this one is not, so it proves the fresh entry drives
+    //    the native service and returns PCM.
     const secondNode = nodes[1] as any;
-    const port = secondNode.port;
-    // The runtime forwards each accepted block to the worklet with its samples, so
-    // observe the results it pushes rather than re-implementing the worklet.
-    port.onmessage({ data: { type: 'profile', event: 'live-bound' } });
+
+    // The runtime forwards a result only to the node that owns the entry. Capture
+    // what the fresh node is handed, so the assertion reads real delivered PCM.
+    const delivered: Array<{ type: string; sequence: number; samples: Float32Array }> = [];
+    const originalPost = secondNode.port.postMessage;
+    secondNode.port.postMessage = (message: any) => {
+      if (message?.type === 'result') delivered.push(message);
+      return originalPost(message);
+    };
+
+    // A distinctive block, so the assertion cannot pass on a zeroed buffer. The
+    // sample index is arbitrary but fixed, and is checked on both channels.
+    const sampleIndex = 0;
+    const input = new Float32Array(VST3_FX_BLOCK_FRAMES * 2).fill(0.375);
+    secondNode.port.onmessage({ data: { type: 'process', sequence: 0, samples: input } });
+
+    // The runtime serialises requests on `entry.tail`. This wait is event-driven, not
+    // a fixed sleep: it yields until the bridge's completion has been delivered, and
+    // a failure to arrive fails the assertion below rather than being absorbed.
+    for (let guard = 0; guard < 200 && delivered.length === 0; guard++) {
+      await new Promise<void>(resolve => setImmediate(resolve));
+    }
+
+    assert.equal(delivered.length, 1, 'the fresh entry returned exactly one PCM block');
+    const result = delivered[0];
+    assert.equal(result.type, 'result');
+    assert.equal(result.sequence, 0, 'the block keeps its sequence identity through the fresh entry');
+    assert.equal(result.samples.length, VST3_FX_BLOCK_FRAMES * 2,
+      'a full planar stereo block came back');
+    // The bridge returns 0.25 for every sample (see the mock above). Asserting the
+    // bridge's own value proves the PCM travelled the full path rather than the
+    // assertion matching the input it was given.
+    assert.equal(result.samples[sampleIndex], 0.25, 'the returned block is the bridge PCM, not the input block');
+    assert.equal(result.samples[VST3_FX_BLOCK_FRAMES + sampleIndex], 0.25, 'both channels are the processed PCM');
+    assert.equal(result.samples[sampleIndex] === input[sampleIndex], false,
+      'the returned PCM differs from the submitted input, so it was really transferred');
+
+    // Processing through the fresh entry must not have reported a second failure.
+    assert.equal(fatal.length, 1, 'processing through the fresh entry reported no new failure');
     assert.equal(runtime.isPrepared(recoveryTrack.id, recoverySlot.id, context, recoveryEffect), true,
-      'a fresh session survives a live-port bind notification');
+      'the fresh entry is still prepared after processing a block');
   } finally {
     restore();
   }

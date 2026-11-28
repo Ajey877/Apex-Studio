@@ -304,9 +304,12 @@ somehow removed:
    arm-probe timeout's actual mechanism
 9. a latched insert stops posting diagnostics: no message storm on the audio
    thread
-10. the real runtime disposes a faulted entry and the next Play, issued **before
-    that disposal finishes**, prepares a fresh, usable session — while refusing to
-    revive the faulted one
+10. the real runtime disposes a faulted entry; the next Play, issued **before that
+    disposal finishes**, prepares a fresh session and returns a new worklet node;
+    and that fresh entry then **processes a block end to end**, returning the
+    bridge's PCM (0.25) for a submitted input of 0.375 — while refusing to revive
+    the faulted one. The bridge is a mock, so this is runtime routing and PCM
+    return, not real plug-in DSP; see §15.
 
 ### 5.1 Verified load-bearing by mutation, not by inspection
 
@@ -652,16 +655,24 @@ failure message captured from the shipped worklet:
 
 - the control-port handler routes `{type:'failure', reason}` into the runtime's
   own `fail(entry, reason)` path;
-- the faulted entry is reported once through the diagnostic feed the UI reads,
-  and once through `onFatal` — the callback the application wires to
-  `audioEngine.stop()`;
+- the faulted entry is reported once through `onFatal` — the callback the
+  application wires to `audioEngine.stop()`. The diagnostic feed the UI reads
+  holds **exactly one entry for this slot, carrying the production message**; that
+  is the feed's real guarantee, since `reportVst3MixerEffect` replaces rather than
+  appends and a duplicate report would overwrite rather than accumulate;
 - `isPrepared()` becomes false and `nodeFor()` returns nothing, which is the
   `prepared=false` the acceptance reports;
 - the entry is disposed: the worklet is sent `stop`, its port is closed, and the
   helper session is closed;
 - the next `ensureTracksPrepared` — issued **before that asynchronous disposal
   finishes**, which is the window a user's next Play lands in — opens a *fresh*
-  session and constructs a *new* worklet node, and the insert is usable again.
+  session and constructs a *new* worklet node;
+- **that fresh entry then processes a block through the real request/response
+  path**: a `{type:'process', sequence:0, samples}` message posted to the fresh
+  node yields exactly one `{type:'result'}` carrying a full planar stereo block
+  whose samples are the **bridge's** 0.25, not the submitted 0.375, so the PCM
+  demonstrably travelled worklet→runtime→bridge→runtime→worklet rather than being
+  echoed or zeroed. No new failure is raised while doing so.
 
 **Not tested, and not claimed.**
 
@@ -673,18 +684,26 @@ failure message captured from the shipped worklet:
   shows `processedBlocks` frozen and `prepared=false`, which is what a stopped
   transport and a disposed insert produce together — but it is not unit-tested
   here.
-- **The native helper.** `bridge` is a mock. No plugin is loaded, no IPC happens,
-  no real audio is processed. The ~28 ms latency outlier that causes the miss
-  cannot be reproduced by this test at all.
+- **The native helper.** `bridge.processAudio` is a mock returning a constant. No
+  plug-in is loaded, no IPC happens, no real DSP runs. What the PCM assertion
+  proves is that the runtime *routes and returns* a block through a fresh entry,
+  **not** that a real plug-in processed it. The ~28 ms latency outlier that causes
+  the miss cannot be reproduced by this test at all.
+- **The shipped worklet's side of that round trip.** The test posts the `process`
+  message itself rather than rendering quanta through the sandboxed worklet,
+  because the worklet's `process()` drives the fixed 21.33 ms deadline pipeline and
+  would need a second scheduler here. The worklet's own result handling is covered
+  by tests 1–9.
 - **The packaged application.** Nothing here runs Electron, the staged helper, or
   the acceptance script.
 - **An ordinary user's machine.** Even a passing CI run says nothing about this;
   see §4.
 
 So the accurate statement is: **recovery after a faulted insert is exercised
-against the shipped runtime with realistic mocks, and it is not verified
-end-to-end.** Option B in §4 remains a proposal that this test *supports*, not a
-guarantee it establishes.
+against the shipped runtime with realistic mocks, including a full PCM
+request/response through the fresh entry, and it is not verified end-to-end.**
+Option B in §4 remains a proposal that this test *supports*, not a guarantee it
+establishes.
 
 ---
 
@@ -833,22 +852,27 @@ deliberately, with these numbers in hand.
 
 ---
 
-## 14. Final CI state on `0e269ff`, and one unrelated pre-existing flake
+## 14. HISTORICAL CI snapshot — `0e269ff` (superseded; see §15 for the current head)
 
-| check | verdict | note |
+> **This section is a historical snapshot of commit `0e269ff` only.** It is kept
+> because the failure it records is real and may recur. **It does not describe the
+> current state of PR #309.** The current head is `ecbc40d`, whose five required
+> checks all pass — see §15.
+
+| check (on `0e269ff`) | verdict | note |
 |---|---|---|
 | `verify` (Apex Studio CI) | **pass** | |
 | `audio-tests` | **pass** | |
 | `Native DSP (ubuntu-latest)` | **pass** | |
 | `windows-package` (Desktop Validation) | **pass** | step 19 PASS 5/5; diagnostic 57/60 |
-| `Native DSP (windows-latest)` | **fail** | step 10, see below |
+| `Native DSP (windows-latest)` | **fail** | step 10; the same job passed on the *previous* head |
 
-The `windows-package` lane — the one this investigation concerns — is **green**,
-with the gating coexistence at **5/5** and the non-gating diagnostic at **57/60**.
-That is the fifth consecutive per-run diagnostic sample on this build: 4, 9, 5, 1,
-3 failures in 60.
+The `windows-package` lane — the one this investigation concerns — was **green on
+this commit too**, with the gating coexistence at **5/5** and the non-gating
+diagnostic at **57/60**. That was the fifth consecutive per-run diagnostic sample
+on this build: 4, 9, 5, 1, 3 failures in 60.
 
-### The one red check is not from this PR
+### The one red check on `0e269ff` was not from this PR
 
 `Native DSP (windows-latest)` failed at step 10, *"Prove editor/audio helper
 process separation with real PIDs"*:
@@ -874,3 +898,109 @@ race in a lane this PR does not touch:
 It is recorded here rather than dismissed because it is a genuine intermittent
 defect in the editor helper's process separation. It is simply not this PR's, and
 this PR does not fix it.
+
+**It did not reproduce on the next head.** `Native DSP (windows-latest)` passed on
+`ecbc40d` (`46042730533`, job `140654271395`, 19 m 38 s), which is the intended
+reading of an intermittent defect: one occurrence, not a standing red check.
+
+---
+
+## 15. CURRENT verification snapshot — head `ecbc40d`
+
+**This is the current state of PR #309.** Everything in §14 is historical.
+
+Base `98b8e81`. Head **`ecbc40d7050ddd287b9107d2d019a0400a015e48`**. Verified twice —
+independently, and again from the workflow APIs while writing this section.
+
+| required check | verdict | job | duration |
+|---|---|---|---|
+| `verify` (Apex Studio CI) | **success** | `140654270933` | 8 m 25 s |
+| `audio-tests` (Audio Validation) | **success** | `140654269348` | 7 m 09 s |
+| `Native DSP (ubuntu-latest)` | **success** | `140654271874` | 8 m 35 s |
+| `Native DSP (windows-latest)` | **success** | `140654271395` | 19 m 38 s |
+| `windows-package` (Desktop Validation) | **success** | `140654269827` | 1 h 02 m 09 s |
+
+**All five pass.** Within `windows-package` (run `46042730116`, 17:33:10–18:35:19 UTC):
+
+| step | verdict | name |
+|---|---|---|
+| 17 | **SUCCESS** | Packaged Windows live input PCM and recording acceptance (fake microphone) |
+| 19 | **SUCCESS** | Packaged native VST3 + live input coexistence acceptance — **5/5**, `deadlineMisses=0` |
+| 21 | SUCCESS | Cold-start deadline diagnostic (high volume, non-gating) — 56/60 |
+| 23 | **SUCCESS** | Native VST3 editor acceptance through the packaged application |
+| 25 | SUCCESS | Record the packaged acceptance verdict |
+| 27 | SUCCESS | Upload Windows package |
+
+Both lanes the failing post-merge run could not complete are green here: step 19
+(the original failure) and step 23, which `45953961366` **skipped**.
+
+The diagnostic recorded `failingRepetitions = [1, 29, 33, 55]`, i.e. 4 of 60. That
+is the sixth per-run sample on this build — 4, 9, 5, 1, 3, 4 — and it is the
+reason §14's existence does not mean the condition was fixed. **The gate passing
+here, and the survey finding four misses in the same job, are both true at once**;
+§12 explains why.
+
+### What test 10 now proves, and what it still does not
+
+The test was corrected again after review, because its previous final step sent a
+`{type:'profile', event:'live-bound'}` message and called that "accepts results
+again". That was not a PCM claim and should not have been written as one.
+
+**Now exercised: real block processing through the fresh entry.** After
+`ensureTracksPrepared` prepares a new session, the test delivers a genuine
+`{type:'process', sequence:0, samples}` message to the fresh node's control port —
+the same message shape the shipped worklet posts — and asserts:
+
+- exactly one `{type:'result'}` comes back, with `sequence: 0`;
+- its sample array is `VST3_FX_BLOCK_FRAMES * 2`, a full planar stereo block;
+- both channels carry **0.25**, the value the bridge mock returns, and **not**
+  0.375, the value the test submitted. So the assertion cannot pass on an echoed
+  input buffer or a zeroed one — the PCM demonstrably travelled
+  worklet→runtime→`bridge.processAudio`→runtime→worklet;
+- `fatal.length` is still 1, so processing the fresh entry raised no new failure;
+- the fresh entry is still prepared afterwards.
+
+The two mutations that matter both fail the test: deleting the runtime's
+`node.port.postMessage({type:'result', ...})` line, and making the assertion expect
+the echoed input instead of the bridge PCM.
+
+**Still not proven, and now stated as such in the test and here:**
+
+- **the real native helper.** `bridge.processAudio` is a mock returning a constant.
+  No plug-in is loaded, no IPC occurs, no real DSP runs. What is proven is that the
+  runtime *routes and returns* PCM through a fresh entry, not that a real plug-in
+  processed it;
+- **the shipped worklet's contribution to the round trip.** The test posts the
+  `process` message itself rather than rendering quanta through the sandboxed
+  worklet, because that worklet's `process()` drives the fixed 21.33 ms deadline
+  pipeline and would need a second scheduler here;
+- **`audioEngine.stop()`.** The `onFatal` callback is a recorder;
+- **the packaged application**, and **ordinary user machines**.
+
+So recovery is verified at the runtime level *including PCM return*, and is still
+**not verified end-to-end**. Option B in §4 remains supported, not guaranteed.
+
+### The diagnostic-feed assertion, corrected
+
+It previously checked `.some(...) === true` while the prose said "exactly once".
+It now asserts a filtered **count of exactly one entry for this slot, carrying the
+production message**, and documents the limit of that assertion in place:
+`reportVst3MixerEffect` **replaces** any existing entry for a `(trackId, slotId)`
+pair rather than appending, so a count of one means *at most one per slot*, not
+*reported exactly once* — a double report would overwrite and still read 1. The
+exact-once property is asserted where it is genuinely observable, on
+`fatal.length`, which is the `onFatal` callback the app wires to the transport
+stop.
+
+### Local verification on this head
+
+| command | exit | result |
+|---|---|---|
+| `npx tsx --test src/audio/nativeVst3DeadlineLatch.test.ts` | 0 | 10 / 10 |
+| `npm run test:audio` | 0 | 2592 / 2592, 485 suites |
+| `npm run test:all` | 0 | 4018 / 4018, 613 suites |
+| `npm run lint` (`tsc --noEmit`) | 0 | clean |
+| `npm run build` | 0 | built in 6.75 s |
+
+No production code is changed by this PR. The only files it touches are
+`src/audio/nativeVst3DeadlineLatch.test.ts` and this report.
