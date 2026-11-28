@@ -1004,3 +1004,66 @@ stop.
 
 No production code is changed by this PR. The only files it touches are
 `src/audio/nativeVst3DeadlineLatch.test.ts` and this report.
+
+---
+
+## 16. The head this report ships on: `639e4d5`
+
+§15 documents the independently verified state of **`ecbc40d`**, where all five
+required checks passed. This revision, `639e4d5`, changes **only** the test file
+and this report, so CI re-ran. Its results are recorded here, as they happened.
+
+| check | verdict | job |
+|---|---|---|
+| `verify` (Apex Studio CI) | **pass** | `140919397225` (8 m 58 s) |
+| `audio-tests` | **pass** | `140919397130` (9 m 24 s) |
+| `Native DSP (ubuntu-latest)` | **pass** | `140919397319` (7 m 16 s) |
+| `Native DSP (windows-latest)` | **pass** | `140919397084` (18 m 35 s) |
+| `windows-package` | **FAIL** | `140919397146` (54 m 14 s) |
+
+Four of five pass. `windows-package` failed at **step 19**, with step 23 skipped
+and step 25 failing as a consequence — the original signature, on a commit whose
+only changes are a test file that is not built into the packaged application and
+this document.
+
+### It failed on the first repetition while the survey passed 59/60
+
+```
+[acceptance]         Cold-start aggregate: reps=1, failing=[1]
+[coldstart-diagnostic] Cold-start aggregate: reps=60, failing=[28]
+coexistence notice:  FAIL 59/60   deadlineMisses=0 for every repetition that ran
+```
+
+The gating lane lost its very first repetition; the 60-repetition survey in the
+**same job, on the same build** recorded one failure in sixty. This is the
+inverse of §12, where the gate passed while the survey failed 4/60, and it is the
+seventh per-run sample: **4, 9, 5, 1, 3, 4, 1 in 60.**
+
+The two missed blocks, both captured with the `accepted`-gated correlation:
+
+| attempt | missed seq | due frame | received | round trip | event-loop lag |
+|---|---|---|---|---|---|
+| 1 | 1 | 3072 | 3200 | **19 ms** | 71.28 |
+| 2 | 2 | 4096 | 4224 | **23 ms** | 71.95 |
+
+Both round trips were **inside** the 21.33 ms budget and both arrived **one
+render quantum late** (3200−3072 = 4224−4096 = 128 frames). Both were rejected as
+`after-failure`, so **no stale PCM was replayed**. This is the §13 anatomy again,
+at sequence 1 as well as 2, and it is the fourth independent job in which the
+recorded round trip for a missed block is under budget.
+
+### What this means, and what it does not
+
+**It does not mean this revision broke anything.** The only changes are a test
+file and this document; `src/`, `native/`, `scripts/` and `.github/` are
+identical to `ecbc40d`, where the same job passed all steps. It is the same
+intermittent condition, at the rate §4 estimates.
+
+**It does mean the check state of this exact head is 4 of 5, with step 19 red.**
+Stating otherwise would be inaccurate, and re-rolling until a green appeared
+would be exactly the sampling bias this document exists to expose. Anyone who
+needs a green packaged run for this change set should read `ecbc40d`
+(§15), which is the same production tree and has one.
+
+The measurement-design decision in §4 remains the only open question, and remains
+a product decision rather than a bug fix.
