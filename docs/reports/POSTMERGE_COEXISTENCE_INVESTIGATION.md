@@ -799,8 +799,8 @@ The results, on source that is identical apart from this document:
 Four consecutive jobs on one build produced **4, 9, 5 and 1 failures in 60**, with
 the gate going pass, fail, pass, pass. That sequence is the clearest statement of
 the problem in this document: the gating lane's verdict tracked runner luck, not a
-change in the software. (These are earlier heads than the final `60fee68`; the
-per-run samples continue in §12–§18.)
+change in the software. (These are earlier heads than `60fee68`, which remains a
+historical successful run; the per-run samples continue in §12–§19.)
 
 Both jobs ran the same build. The second failed the gate at **2 of 5** — three
 repetitions were lost to the warmup — and its diagnostic recorded **nine**
@@ -864,12 +864,11 @@ deliberately, with these numbers in hand.
 
 ---
 
-## 14. HISTORICAL CI snapshot — `0e269ff` (superseded; see §18 for the final head)
+## 14. HISTORICAL CI snapshot — `0e269ff` (superseded; see §19 for the current head)
 
 > **This section is a historical snapshot of commit `0e269ff` only.** It is kept
 > because the failure it records is real and may recur. **It does not describe the
-> current state of PR #309.** The final head is `60fee68`, whose five required
-> checks all pass — see §18.
+> current state of PR #309.** The current head is `f1515b0` — see §19.
 
 | check (on `0e269ff`) | verdict | note |
 |---|---|---|
@@ -917,11 +916,11 @@ reading of an intermittent defect: one occurrence, not a standing red check.
 
 ---
 
-## 15. Verification snapshot — head `ecbc40d` (superseded; see §18)
+## 15. Verification snapshot — head `ecbc40d` (superseded; see §19)
 
 > **Snapshot of `ecbc40d` only.** It was the current head when written and is kept
-> because it was independently verified. **It is not the final head**; the final
-> head is `60fee68` — see §18.
+> because it was independently verified. **It is not the current head**; see §19
+> for the current head and its check results.
 
 Base `98b8e81`. Head **`ecbc40d7050ddd287b9107d2d019a0400a015e48`**. Verified twice —
 independently, and again from the workflow APIs while writing this section.
@@ -1028,8 +1027,8 @@ No production code is changed by this PR. The only files it touches are
 required checks passed. This revision, `639e4d5`, changed **only** the test file
 and this report, so CI re-ran. Its results are recorded here, as they happened.
 
-> **Superseded.** This section records one head's CI outcome, not the PR's final
-> state. The final head is `60fee68` — see §18.
+> **Superseded.** This section records one head's CI outcome, not the PR's current
+> state. See §19 for the current head.
 
 | check | verdict | job |
 |---|---|---|
@@ -1088,11 +1087,11 @@ a product decision rather than a bug fix.
 
 ---
 
-## 17. HISTORICAL check state — head `421c1a6` (superseded; see §18)
+## 17. HISTORICAL check state — head `421c1a6` (superseded; see §19)
 
 > **Snapshot of `421c1a6` only.** It is kept because the run is the cleanest
-> packaged result in this document and worth citing. **It is not the final head**;
-> the head this report ships on is `60fee68` — see §18.
+> packaged result in this document and worth citing. **It is not the current head**;
+> see §19 for the current head.
 
 This commit's CI re-ran after §16, and all five required checks passed.
 
@@ -1137,15 +1136,16 @@ scenario passes often, the gate tracks runner luck, and **a genuine missed
 deadline still stops playback and remains a DAW reliability risk** (§4).
 
 No production code is changed by this PR at any commit. The only files it touches
-are `src/audio/nativeVst3DeadlineLatch.test.ts` and this report. (§18 records the
-final head.)
+are `src/audio/nativeVst3DeadlineLatch.test.ts` and this report. (§19 records the
+current head.)
 
 ---
 
-## 18. FINAL check state — head `60fee68`
+## 18. HISTORICAL check state — head `60fee68` (all five passed; superseded)
 
-**This is the final head of PR #309.** Everything in §14, §16 and §17 is a
-historical snapshot of an earlier head and does not describe the PR's status.
+> **Historical successful snapshot of `60fee68` only.** It is kept because it is the
+> last head whose five required checks all passed. **It is not the current head.**
+> `f1515b0` is — see §19 for its actual result.
 
 Base `98b8e81b8536d0fc16b1910fa2f7f381fc6ed8db`.
 Head **`60fee683f589139dd69b9af79890533d9879b8d5`**.
@@ -1211,6 +1211,88 @@ transport stop, and propagation into the acceptance's `arm-probe` timeout.
 explanation for the latency outlier. The measured plug-in callback never exceeded
 0.03 ms, which rules out the *measured callback duration*, not every plug-in-related,
 host, driver or system effect.
+
+**Unresolved** — whether comparable misses occur on ordinary user systems. If they
+do, a genuine missed deadline still stops playback, and that remains a DAW
+reliability risk which this PR makes diagnosable and does not remove.
+
+---
+
+## 19. CURRENT check state — head `f1515b0` (4 of 5 required checks pass)
+
+**This is the current head of PR #309.** §18 and everything before it record earlier
+heads and do not describe the PR's current status.
+
+Base `98b8e81b8536d0fc16b1910fa2f7f381fc6ed8db`.
+Head **`f1515b0fefbe4e9be3c5f4dc0f7f673259f625f5`**.
+
+| required check | verdict | duration |
+|---|---|---|
+| `verify` (Apex Studio CI) | **pass** | 10 m 03 s |
+| `audio-tests` (Audio Validation) | **pass** | 9 m 14 s |
+| `Native DSP (ubuntu-latest)` | **pass** | 8 m 02 s |
+| `Native DSP (windows-latest)` | **pass** | 15 m 03 s |
+| `windows-package` (Desktop Validation) | **FAIL** | 55 m 43 s |
+
+**Four of five required checks pass. `windows-package` fails.**
+
+Within `windows-package`:
+
+- Step **19** (packaged coexistence) **FAIL** — gate **2 of 5**. The aggregated
+  annotation reads `PPF` with `passedRuns=2`, `requestedRuns=5`: repetitions 1 and 2
+  passed, repetition 3 failed, and the run ended before repetitions 4 and 5.
+- Both recorded failures are **warmup timeouts**, not steady-state latency misses:
+  `Warmup timed out: the native insert was never proven prepared and actively
+  processing`, with `prepared=false`, `deadlineMisses=1`, `nativeFailures=0`,
+  `processedBlocks=3` in one and `14` in the other. A single deadline miss latched
+  the fail-closed guard, so playback stopped rather than replaying stale PCM, and
+  the insert never reached "prepared and actively processing" inside the 60 s
+  warmup window.
+- Step **21** (cold-start diagnostic) **PASS** as a non-gating step, while its own
+  60-repetition survey recorded **59/60** (`failing=[20]`) — the §12 pattern again:
+  a green gate alongside a survey that found a miss.
+- Step **23** (packaged editor acceptance) **SKIPPED**, because it runs only after
+  step 19 passes.
+- Step 25 FAIL, step 27 (upload Windows package) SKIPPED.
+
+**Why this is not read as a regression from this commit.** This head's only change
+is wording. Stripping comments and string literals from
+`src/audio/nativeVst3DeadlineLatch.test.ts` leaves 382 lines byte-for-byte identical
+to `60fee68`, and the PR changes no production code at any commit. The packaged
+gate has now produced, on this same build with no behavioural change: pass
+(`421c1a6`), pass (`60fee68`), fail (`639e4d5`, gate 1/5), fail (`f1515b0`, gate
+2/5). That is the intermittency §12 documents, observed once more on the current
+head. It is reported here as a failure, not explained away.
+
+### What the tests prove, stated without overreach
+
+Unchanged from §18, and restated here so the current head carries its own account.
+Tests 1–9 evaluate the shipped worklet source in a sandbox. **Test 10 does not
+connect a worklet to the runtime**: it captures the shipped worklet's real
+`{type:'failure', reason}` text in that sandbox, then **injects a message of the same
+shape and text into a separately mocked `AudioWorkletNode` port**. The two live ports
+are never wired together. Its PCM step is a **runtime-level request/response check**:
+the test injects a `{type:'process'}` message into the mocked port, the runtime calls
+`bridge.processAudio`, the **bridge mock** returns constant 0.25, the runtime posts
+`{type:'result', …}`, and the test asserts that result. It is **not** a real AudioWorklet
+round trip and **not** plug-in DSP — no plug-in is loaded, no IPC occurs, no audio is
+processed.
+
+**Preserved limitations:** bridge processing is mocked; the process request and the
+failure message are injected directly by the test; the `AudioWorkletNode` and its
+port are mocked; `audioEngine.stop()` is recorded via the `onFatal` callback and not
+exercised end-to-end; the packaged application is not exercised by these tests. No
+physical-hardware claim and no ordinary-user-machine reliability claim is made.
+
+### The three categories, unchanged
+
+**Proven** — the deadline miss, the fail-closed latch, entry disposal, the transport
+stop, and propagation into the acceptance's `arm-probe` timeout.
+
+**Supported but not isolated** — host/OS scheduling contention as the likely
+explanation for the latency outlier. The measured plug-in callback never exceeded
+0.03 ms, which rules out the *measured callback duration*, not every
+plug-in-related, host, driver or system effect.
 
 **Unresolved** — whether comparable misses occur on ordinary user systems. If they
 do, a genuine missed deadline still stops playback, and that remains a DAW
