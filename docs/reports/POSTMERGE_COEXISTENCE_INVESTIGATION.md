@@ -1067,3 +1067,53 @@ needs a green packaged run for this change set should read `ecbc40d`
 
 The measurement-design decision in §4 remains the only open question, and remains
 a product decision rather than a bug fix.
+
+---
+
+## 17. Final check state — head `421c1a6`
+
+The commit that added §16 re-ran CI. Its results are below, and they supersede
+§16 as the check state of the head this report ships on.
+
+**Head `421c1a6f3971b4f34f36877d44adca33c55bc16c`. All five required checks pass.**
+
+| check | verdict | job | duration |
+|---|---|---|---|
+| `verify` (Apex Studio CI) | **success** | `140932578133` | 8 m 04 s |
+| `audio-tests` (Audio Validation) | **success** | `140932577932` | 7 m 39 s |
+| `Native DSP (ubuntu-latest)` | **success** | `140932578296` | 6 m 58 s |
+| `Native DSP (windows-latest)` | **success** | `140932578143` | 19 m 10 s |
+| `windows-package` (Desktop Validation) | **success** | `140932578354` | 54 m 11 s |
+
+Within `windows-package`:
+
+| step | verdict | name |
+|---|---|---|
+| 17 | **SUCCESS** | Packaged Windows live input PCM and recording acceptance (fake microphone) |
+| 19 | **SUCCESS** | Packaged native VST3 + live input coexistence acceptance — **5/5**, `deadlineMisses=0` |
+| 21 | SUCCESS | Cold-start deadline diagnostic (high volume, non-gating) — **60/60** |
+| 23 | **SUCCESS** | Native VST3 editor acceptance through the packaged application |
+| 25 | SUCCESS | Record the packaged acceptance verdict |
+| 27 | SUCCESS | Upload Windows package |
+
+This is the cleanest packaged run recorded anywhere in this document: **5/5
+gating and 60/60 diagnostic, with `deadlineMisses=0` on every lane and no helper
+process leaked.** Both lanes that the original post-merge failure could not
+complete — step 19 (the failure itself) and step 23, which `45953961366` skipped
+— passed.
+
+### Read it in context, not as a resolution
+
+A 60/60 does not contradict §16, which recorded step 19 failing on its first
+repetition with the survey at 59/60 on the previous commit. These are the eighth
+and seventh per-run samples of one build: **4, 9, 5, 1, 3, 4, 1, 0 failures in
+60.**
+
+Two adjacent commits, identical in every build input, produced **1/60 then 0/60**
+in the gate outcomes *failed then passed*. That is the same non-stationarity §13
+documents, in the direction that happens to be green. The finding stands: the
+scenario passes often, the gate tracks runner luck, and **a genuine missed
+deadline still stops playback and remains a DAW reliability risk** (§4).
+
+No production code is changed by this PR at any commit. The only files it touches
+are `src/audio/nativeVst3DeadlineLatch.test.ts` and this report.
