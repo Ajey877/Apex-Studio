@@ -166,10 +166,18 @@ in §3: a late result trips the guard, the entry is faulted and disposed,
 link of that is executed in the tests on this branch or cited in the shipped
 source. Nothing in that chain is broken behaviour; it is the guarantee working.
 
-**PROVEN — the plug-in itself did not cause the latency.** The 60-run
-diagnostic has instrumented eight failures with a full decomposition, and
-`processor->process(data)` — the plug-in callback alone — never exceeded
-**0.03 ms**, in a failing block or any neighbour.
+**PROVEN — the instrumented plug-in callback did not account for the observed
+delay.** The 60-run diagnostic has instrumented eight failures with a full
+decomposition, and `processor->process(data)` — the plug-in callback alone, as the
+helper measured it — never exceeded **0.03 ms**, in a failing block or any
+neighbour.
+
+**Scope of that claim, stated carefully.** It rules out *the measured plug-in
+callback duration* as the source of the delay. It does **not** exclude every
+plug-in-related effect, and it does not exclude host, driver, scheduling or system
+effects: the callback is timed inside the helper's host thread, so time spent
+outside it is invisible to this measurement. "The callback was 0.03 ms" is a
+statement about where the *measured* time was not, not a general exoneration.
 
 **SUPPORTED BUT NOT ISOLATED — host/OS scheduling contention is the likely
 explanation for the latency outlier.** The time is spread across host work and
@@ -667,12 +675,15 @@ failure message captured from the shipped worklet:
 - the next `ensureTracksPrepared` — issued **before that asynchronous disposal
   finishes**, which is the window a user's next Play lands in — opens a *fresh*
   session and constructs a *new* worklet node;
-- **that fresh entry then processes a block through the real request/response
-  path**: a `{type:'process', sequence:0, samples}` message posted to the fresh
-  node yields exactly one `{type:'result'}` carrying a full planar stereo block
-  whose samples are the **bridge's** 0.25, not the submitted 0.375, so the PCM
-  demonstrably travelled worklet→runtime→bridge→runtime→worklet rather than being
-  echoed or zeroed. No new failure is raised while doing so.
+- **that fresh entry's request/response path then runs**: a
+  `{type:'process', sequence:0, samples}` message injected into the **mocked** node
+  port makes the shipped runtime call `bridge.processAudio` and post exactly one
+  `{type:'result'}` back, carrying a full planar stereo block whose samples are the
+  **bridge mock's** 0.25 and not the submitted 0.375. That proves the runtime
+  forwards the request and returns the bridge's PCM rather than echoing or zeroing
+  the input. It is **not** a worklet round trip and **not** plug-in DSP: the process
+  request is injected directly, the node port is a mock, and the bridge returns a
+  constant. No new failure is raised while doing so.
 
 **Not tested, and not claimed.**
 
@@ -785,10 +796,11 @@ The results, on source that is identical apart from this document:
 | `46015836980` | `140562594035` | **PASS 5/5** | **5/60** | — |
 | `46025549899` | `140595888501` | **PASS 5/5** | **1/60** | — |
 
-The third row is the head this report ships on. Four consecutive jobs on one
-build produced **4, 9, 5 and 1 failures in 60**, with the gate going pass, fail,
-pass, pass. That sequence is the clearest statement of the problem in this document:
-the gating lane's verdict tracked runner luck, not a change in the software.
+Four consecutive jobs on one build produced **4, 9, 5 and 1 failures in 60**, with
+the gate going pass, fail, pass, pass. That sequence is the clearest statement of
+the problem in this document: the gating lane's verdict tracked runner luck, not a
+change in the software. (These are earlier heads than the final `60fee68`; the
+per-run samples continue in §12–§18.)
 
 Both jobs ran the same build. The second failed the gate at **2 of 5** — three
 repetitions were lost to the warmup — and its diagnostic recorded **nine**
@@ -852,12 +864,12 @@ deliberately, with these numbers in hand.
 
 ---
 
-## 14. HISTORICAL CI snapshot — `0e269ff` (superseded; see §15 for the current head)
+## 14. HISTORICAL CI snapshot — `0e269ff` (superseded; see §18 for the final head)
 
 > **This section is a historical snapshot of commit `0e269ff` only.** It is kept
 > because the failure it records is real and may recur. **It does not describe the
-> current state of PR #309.** The current head is `ecbc40d`, whose five required
-> checks all pass — see §15.
+> current state of PR #309.** The final head is `60fee68`, whose five required
+> checks all pass — see §18.
 
 | check (on `0e269ff`) | verdict | note |
 |---|---|---|
@@ -905,9 +917,11 @@ reading of an intermittent defect: one occurrence, not a standing red check.
 
 ---
 
-## 15. CURRENT verification snapshot — head `ecbc40d`
+## 15. Verification snapshot — head `ecbc40d` (superseded; see §18)
 
-**This is the current state of PR #309.** Everything in §14 is historical.
+> **Snapshot of `ecbc40d` only.** It was the current head when written and is kept
+> because it was independently verified. **It is not the final head**; the final
+> head is `60fee68` — see §18.
 
 Base `98b8e81`. Head **`ecbc40d7050ddd287b9107d2d019a0400a015e48`**. Verified twice —
 independently, and again from the workflow APIs while writing this section.
@@ -947,16 +961,17 @@ The test was corrected again after review, because its previous final step sent 
 again". That was not a PCM claim and should not have been written as one.
 
 **Now exercised: real block processing through the fresh entry.** After
-`ensureTracksPrepared` prepares a new session, the test delivers a genuine
-`{type:'process', sequence:0, samples}` message to the fresh node's control port —
-the same message shape the shipped worklet posts — and asserts:
+`ensureTracksPrepared` prepares a new session, the test injects a
+`{type:'process', sequence:0, samples}` message into the **mocked** node port and
+asserts:
 
 - exactly one `{type:'result'}` comes back, with `sequence: 0`;
 - its sample array is `VST3_FX_BLOCK_FRAMES * 2`, a full planar stereo block;
 - both channels carry **0.25**, the value the bridge mock returns, and **not**
   0.375, the value the test submitted. So the assertion cannot pass on an echoed
-  input buffer or a zeroed one — the PCM demonstrably travelled
-  worklet→runtime→`bridge.processAudio`→runtime→worklet;
+  input buffer or a zeroed one — the runtime returned the **bridge mock's** PCM.
+  This is a runtime-level request/response check: the request is injected directly,
+  the port is a mock, and no worklet rendered it and no plug-in processed it;
 - `fatal.length` is still 1, so processing the fresh entry raised no new failure;
 - the fresh entry is still prepared afterwards.
 
@@ -1007,11 +1022,14 @@ No production code is changed by this PR. The only files it touches are
 
 ---
 
-## 16. The head this report ships on: `639e4d5`
+## 16. HISTORICAL check state — head `639e4d5` (superseded)
 
 §15 documents the independently verified state of **`ecbc40d`**, where all five
-required checks passed. This revision, `639e4d5`, changes **only** the test file
+required checks passed. This revision, `639e4d5`, changed **only** the test file
 and this report, so CI re-ran. Its results are recorded here, as they happened.
+
+> **Superseded.** This section records one head's CI outcome, not the PR's final
+> state. The final head is `60fee68` — see §18.
 
 | check | verdict | job |
 |---|---|---|
@@ -1070,10 +1088,13 @@ a product decision rather than a bug fix.
 
 ---
 
-## 17. Final check state — head `421c1a6`
+## 17. HISTORICAL check state — head `421c1a6` (superseded; see §18)
 
-The commit that added §16 re-ran CI. Its results are below, and they supersede
-§16 as the check state of the head this report ships on.
+> **Snapshot of `421c1a6` only.** It is kept because the run is the cleanest
+> packaged result in this document and worth citing. **It is not the final head**;
+> the head this report ships on is `60fee68` — see §18.
+
+This commit's CI re-ran after §16, and all five required checks passed.
 
 **Head `421c1a6f3971b4f34f36877d44adca33c55bc16c`. All five required checks pass.**
 
@@ -1116,4 +1137,81 @@ scenario passes often, the gate tracks runner luck, and **a genuine missed
 deadline still stops playback and remains a DAW reliability risk** (§4).
 
 No production code is changed by this PR at any commit. The only files it touches
-are `src/audio/nativeVst3DeadlineLatch.test.ts` and this report.
+are `src/audio/nativeVst3DeadlineLatch.test.ts` and this report. (§18 records the
+final head.)
+
+---
+
+## 18. FINAL check state — head `60fee68`
+
+**This is the final head of PR #309.** Everything in §14, §16 and §17 is a
+historical snapshot of an earlier head and does not describe the PR's status.
+
+Base `98b8e81b8536d0fc16b1910fa2f7f381fc6ed8db`.
+Head **`60fee683f589139dd69b9af79890533d9879b8d5`**.
+
+| required check | verdict | duration | job |
+|---|---|---|---|
+| `verify` (Apex Studio CI) | **pass** | 8 m 23 s | `140945787055` |
+| `audio-tests` (Audio Validation) | **pass** | 7 m 54 s | `140945786847` |
+| `Native DSP (ubuntu-latest)` | **pass** | 8 m 07 s | `140945787012` |
+| `Native DSP (windows-latest)` | **pass** | 18 m 47 s | `140945786833` |
+| `windows-package` (Desktop Validation) | **pass** | 59 m 22 s | `140945787032` |
+
+**All five required checks pass.** Within `windows-package`: step 17 PASS,
+**step 19 PASS 5/5** (`deadlineMisses=0`), step 21 PASS (diagnostic 59/60),
+**step 23 PASS** (packaged editor acceptance), step 25 PASS.
+
+The 60-repetition diagnostic in that job read **59/60** (`failing=[31]`) — so the
+gate was green while the survey found one miss, which is the §12 pattern and the
+ninth per-run sample on this build.
+
+### What the tests prove, stated without overreach
+
+**Two layers, two objects, deliberately not connected.**
+
+Tests 1–9 evaluate `VST3_FX_WORKLET_SOURCE` in a sandbox and exercise the shipped
+worklet's own guard, latching, result handling and duplicate rejection.
+
+Test 10 does **not** connect a worklet to the runtime. It captures the shipped
+worklet's real `{type:'failure', reason}` text in the sandbox, then **injects a
+message with that same shape and text into a separately mocked `AudioWorkletNode`
+port**. The shipped runtime's reaction to that message is what is under test. The
+two live ports are never wired together; that wiring (`node.port.onmessage`) is
+exercised against a mock the test drives directly, not against a worklet running
+on an audio thread.
+
+**The PCM step is a runtime-level request/response check, not a round trip.** The
+test injects `{type:'process', sequence:0, samples}` into the mocked port; the
+runtime calls `bridge.processAudio`; the **bridge mock** returns constant 0.25; the
+runtime posts `{type:'result', …}` back; the test asserts the returned result and
+its contents (0.25, not the submitted 0.375, so an echo or zeroed buffer cannot
+pass). What that establishes is that the runtime accepts a request for the fresh
+entry, forwards it, and returns the bridge's PCM. It does **not** establish a real
+AudioWorklet round trip, and it does **not** establish plug-in DSP — no plug-in is
+loaded, no IPC occurs, no audio is processed.
+
+**Preserved limitations**, unchanged by this pass:
+
+- Bridge processing is **mocked** (constant return; no plug-in, no IPC).
+- The process request and the failure message are **injected directly** by the test.
+- The `AudioWorkletNode` and its port are **mocked**.
+- `audioEngine.stop()` is **recorded** via the `onFatal` callback, not exercised
+  end-to-end; the app's `() => { this.stop(); }` body is not run.
+- The packaged application is not exercised by these tests.
+- **No physical-hardware claim**, and **no claim about ordinary-user-machine
+  reliability**, is made anywhere in this document.
+
+### The three categories, unchanged
+
+**Proven** — the deadline miss, the fail-closed latch, entry disposal, the
+transport stop, and propagation into the acceptance's `arm-probe` timeout.
+
+**Supported but not isolated** — host/OS scheduling contention as the likely
+explanation for the latency outlier. The measured plug-in callback never exceeded
+0.03 ms, which rules out the *measured callback duration*, not every plug-in-related,
+host, driver or system effect.
+
+**Unresolved** — whether comparable misses occur on ordinary user systems. If they
+do, a genuine missed deadline still stops playback, and that remains a DAW
+reliability risk which this PR makes diagnosable and does not remove.

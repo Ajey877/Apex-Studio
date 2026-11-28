@@ -451,15 +451,31 @@ test('10. the real runtime disposes a faulted entry, the next Play prepares a fr
    * `getBridge`, and `AudioWorkletNode` is a global, so both are the same seams
    * `nativeVst3EffectRuntime.test.ts` uses.
    *
-   * The chain under test is the one the acceptance depends on:
-   *   shipped worklet posts {type:'failure', reason}
-   *     -> node.port.onmessage -> runtime.fail(entry, reason)
+   * IMPORTANT - how the message flow is actually assembled, because it is easy to
+   * over-read. There are TWO separate objects here and they are NOT connected:
+   *
+   *   1. a sandboxed instance of the shipped worklet (`loadShippedWorklet`), whose
+   *      real guard fires and whose real `{type:'failure', reason}` message is
+   *      captured as `shippedFailure`. Its live port goes nowhere.
+   *   2. a mocked `AudioWorkletNode` (`RecordingWorkletNode`) that the runtime
+   *      constructs, whose port is driven by the test.
+   *
+   * The test injects a message with the SAME SHAPE AND TEXT into the mocked
+   * runtime port:
+   *   {type:'failure', reason: shippedFailure}
+   *     -> mocked node.port.onmessage -> runtime.fail(entry, reason)
    *     -> entry.faulted = true, reportVst3MixerEffect, onFatal (the app stops the
    *        transport here), disposeEntry(entry) which removes it from `prepared`
    *   ... and then, on the next Play, ensureTracksPrepared takes the `faulted` entry
    *   as NON-reusable, disposes it and opens a FRESH session.
    *
-   * What this does NOT prove is stated in the report: it exercises the runtime's
+   * So what is proven is: the shipped worklet produces that message, AND the shipped
+   * runtime reacts to that message by faulting and disposing. What is NOT proven is
+   * that the two ports are wired together - that wiring is the runtime's own
+   * `node.port.onmessage` assignment, exercised here against a mock that the test
+   * drives directly, not against a worklet running on an audio thread.
+   *
+   * What this also does NOT prove, stated in the report: it exercises the runtime's
    * disposal and re-preparation, not `audioEngine.stop()` (which `onFatal` invokes
    * in the app) and not the native helper itself, which is mocked.
    *
@@ -560,7 +576,11 @@ test('10. the real runtime disposes a faulted entry, the next Play prepares a fr
     assert.equal(nodes.length, 1, 'one worklet node was constructed');
     const firstNode = nodes[0];
 
-    // 2. The shipped worklet fires. Deliver its ACTUAL message to the runtime.
+    // 2. Inject the shipped worklet's message into the MOCKED runtime port. The two
+    //    objects are separate (see the header): `shippedFailure` was captured from the
+    //    sandboxed worklet above, and is replayed here with the same shape and text.
+    //    This proves the runtime reacts correctly to that message; it does not prove a
+    //    live worklet-to-runtime port connection.
     assert.equal(firstNode.port.onmessage !== null, true,
       'the runtime installed a control-port handler, which is the path under test');
     firstNode.port.onmessage!({ data: { type: 'failure', reason: shippedFailure } });
@@ -612,15 +632,28 @@ test('10. the real runtime disposes a faulted entry, the next Play prepares a fr
       'lookups return the fresh node');
     assert.equal(fatal.length, 1, 'no second failure was reported for the fresh session');
 
-    // 6. The fresh entry actually PROCESSES A BLOCK. This is the difference between
-    //    "a new entry exists" and "recovery works", so it is exercised through the
-    //    real request/response path the runtime uses in production:
-    //      worklet posts {type:'process', sequence, samples}
-    //        -> runtime awaits bridge.processAudio(session-2, ...)
-    //        -> runtime posts {type:'result', sequence, samples} back on node.port
-    //    The failure path from step 2 was one-way (the worklet's `failure` message
-    //    needs no round trip); this one is not, so it proves the fresh entry drives
-    //    the native service and returns PCM.
+    // 6. The fresh entry PROCESSES A BLOCK. Read the scope precisely, because this is
+    //    the easiest claim in the file to overstate.
+    //
+    //    What is exercised is the SHIPPED RUNTIME's request/response logic, driven by
+    //    messages the test injects into a MOCKED node port:
+    //      test injects {type:'process', sequence, samples} into the mocked port
+    //        -> runtime calls bridge.processAudio(session-2, ...)
+    //        -> the BRIDGE MOCK returns constant 0.25
+    //        -> runtime posts {type:'result', sequence, samples} on the mocked port
+    //        -> the test reads that result and asserts its contents
+    //
+    //    What this proves: the runtime accepts a process request for the fresh entry,
+    //    forwards it to the bridge, and posts back a full-size result carrying the
+    //    bridge's PCM rather than the submitted input.
+    //
+    //    What it does NOT prove, and must not be written as if it did:
+    //      - NOT a real AudioWorklet round trip. No worklet renders quanta here; the
+    //        process request is injected directly by the test, and the node port is a
+    //        mock. The shipped worklet's own `process()`/result handling is covered by
+    //        tests 1-9 in the sandbox, not by this step.
+    //      - NOT real plug-in DSP. `bridge.processAudio` is a mock returning a
+    //        constant; no plug-in is loaded, no IPC happens, no audio is processed.
     const secondNode = nodes[1] as any;
 
     // The runtime forwards a result only to the node that owns the entry. Capture
@@ -652,12 +685,12 @@ test('10. the real runtime disposes a faulted entry, the next Play prepares a fr
     assert.equal(result.samples.length, VST3_FX_BLOCK_FRAMES * 2,
       'a full planar stereo block came back');
     // The bridge returns 0.25 for every sample (see the mock above). Asserting the
-    // bridge's own value proves the PCM travelled the full path rather than the
-    // assertion matching the input it was given.
+    // bridge's own value proves the runtime returned the BRIDGE's PCM rather than
+    // echoing the submitted input. It does not imply the samples came from a plug-in.
     assert.equal(result.samples[sampleIndex], 0.25, 'the returned block is the bridge PCM, not the input block');
-    assert.equal(result.samples[VST3_FX_BLOCK_FRAMES + sampleIndex], 0.25, 'both channels are the processed PCM');
+    assert.equal(result.samples[VST3_FX_BLOCK_FRAMES + sampleIndex], 0.25, 'both channels carry the bridge PCM');
     assert.equal(result.samples[sampleIndex] === input[sampleIndex], false,
-      'the returned PCM differs from the submitted input, so it was really transferred');
+      'the returned PCM differs from the submitted input, so the runtime returned the bridge result');
 
     // Processing through the fresh entry must not have reported a second failure.
     assert.equal(fatal.length, 1, 'processing through the fresh entry reported no new failure');
